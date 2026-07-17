@@ -1,6 +1,15 @@
 """Database models and helpers."""
 
-from lensmind.db.models import Album, AlbumPhoto, Base, IndexingRun, Photo, SourceFolder
+from lensmind.db.models import (
+    Album,
+    AlbumPhoto,
+    Base,
+    DuplicateGroup,
+    DuplicateGroupPhoto,
+    IndexingRun,
+    Photo,
+    SourceFolder,
+)
 from lensmind.db.repository import (
     PhotoData,
     PhotoRepository,
@@ -12,6 +21,8 @@ __all__ = [
     "Album",
     "AlbumPhoto",
     "Base",
+    "DuplicateGroup",
+    "DuplicateGroupPhoto",
     "IndexingRun",
     "Photo",
     "PhotoData",

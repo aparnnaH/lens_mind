@@ -39,6 +39,7 @@ class Photo(Base):
     filename: Mapped[str] = mapped_column(String, nullable=False)
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    perceptual_hash: Mapped[str | None] = mapped_column(String(16), index=True)
     capture_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     timestamp_source: Mapped[str | None] = mapped_column(String)
     width: Mapped[int | None] = mapped_column(Integer)
@@ -58,6 +59,10 @@ class Photo(Base):
     missing_file: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     album_links: Mapped[list[AlbumPhoto]] = relationship(
+        back_populates="photo",
+        cascade="all, delete-orphan",
+    )
+    duplicate_links: Mapped[list[DuplicateGroupPhoto]] = relationship(
         back_populates="photo",
         cascade="all, delete-orphan",
     )
@@ -116,3 +121,44 @@ class IndexingRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
     source_folder: Mapped[SourceFolder] = relationship(back_populates="indexing_runs")
+
+
+class DuplicateGroup(Base):
+    __tablename__ = "duplicate_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    classification: Mapped[str] = mapped_column(String, nullable=False)
+    group_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    distance_threshold: Mapped[int | None] = mapped_column(Integer)
+    max_distance: Mapped[int | None] = mapped_column(Integer)
+    reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    preferred_photo_id: Mapped[int | None] = mapped_column(ForeignKey("photos.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    photo_links: Mapped[list[DuplicateGroupPhoto]] = relationship(
+        back_populates="duplicate_group",
+        cascade="all, delete-orphan",
+    )
+    preferred_photo: Mapped[Photo | None] = relationship(
+        foreign_keys=[preferred_photo_id],
+    )
+
+
+class DuplicateGroupPhoto(Base):
+    __tablename__ = "duplicate_group_photos"
+
+    duplicate_group_id: Mapped[int] = mapped_column(
+        ForeignKey("duplicate_groups.id"),
+        primary_key=True,
+    )
+    photo_id: Mapped[int] = mapped_column(ForeignKey("photos.id"), primary_key=True)
+
+    duplicate_group: Mapped[DuplicateGroup] = relationship(
+        back_populates="photo_links",
+    )
+    photo: Mapped[Photo] = relationship(back_populates="duplicate_links")

@@ -29,7 +29,12 @@ from PySide6.QtWidgets import (
 from sqlalchemy.orm import Session, sessionmaker
 
 from lensmind.db.models import Photo
-from lensmind.db.repository import PhotoRepository, initialize_sqlite
+from lensmind.db.repository import (
+    DuplicateGroupData,
+    DuplicatePhotoData,
+    PhotoRepository,
+    initialize_sqlite,
+)
 from lensmind.services.blur_analysis import BlurThresholds
 from lensmind.services.photo_display import PhotoDisplayInfo, PhotoDisplayService
 from lensmind.services.photo_import import PhotoImportService
@@ -75,6 +80,7 @@ class MainWindow(QMainWindow):
             ),
         )
         self._blurry_photos_page.photo_selected.connect(self._show_photo_details)
+        self._duplicates_page = DuplicatesPage(self._get_session_factory)
         self._indexing_page = IndexingPage()
         self._pages = QStackedWidget()
         self._sidebar = self._build_sidebar()
@@ -120,6 +126,8 @@ class MainWindow(QMainWindow):
                 self._pages.addWidget(self._all_photos_page)
             elif title == "Blurry Photos":
                 self._pages.addWidget(self._blurry_photos_page)
+            elif title == "Duplicates":
+                self._pages.addWidget(self._duplicates_page)
             elif title == "Indexing":
                 self._pages.addWidget(self._indexing_page)
             else:
@@ -184,6 +192,8 @@ class MainWindow(QMainWindow):
             self._all_photos_page.load_photos()
         elif PAGE_TITLES[row] == "Blurry Photos":
             self._blurry_photos_page.load_photos()
+        elif PAGE_TITLES[row] == "Duplicates":
+            self._duplicates_page.load_duplicate_groups()
 
     def _clear_import_worker(self) -> None:
         self._indexing_page.cancel_button.clicked.disconnect()
@@ -485,6 +495,287 @@ class PhotoDetailsInspector(QFrame):
         self.copy_path_button.setEnabled(enabled)
 
 
+class DuplicatesPage(QWidget):
+    def __init__(
+        self,
+        session_factory_provider: Callable[[], sessionmaker[Session]],
+    ) -> None:
+        super().__init__()
+        self._session_factory_provider = session_factory_provider
+        self._groups: list[DuplicateGroupData] = []
+        self._selected_group: DuplicateGroupData | None = None
+        self._selected_photo: DuplicatePhotoData | None = None
+
+        title_label = QLabel("Duplicates")
+        title_label.setObjectName("pageTitle")
+
+        self.group_list = QListWidget()
+        self.group_list.setObjectName("duplicateGroupList")
+        self.group_list.currentRowChanged.connect(self._show_group)
+
+        self.status_label = QLabel("No duplicate groups")
+        self.status_label.setObjectName("duplicateStatus")
+        self.reviewed_label = QLabel("-")
+        self.reviewed_label.setObjectName("duplicateReviewedStatus")
+        self.preferred_label = QLabel("-")
+        self.preferred_label.setObjectName("duplicatePreferredStatus")
+
+        self.left_preview = DuplicatePreviewPanel("Photo A")
+        self.right_preview = DuplicatePreviewPanel("Photo B")
+        self.left_preview.selected.connect(self._select_photo)
+        self.right_preview.selected.connect(self._select_photo)
+
+        self.open_in_finder_button = QPushButton("Open in Finder")
+        self.open_in_finder_button.setObjectName("duplicateOpenInFinderButton")
+        self.keep_all_button = QPushButton("Keep All")
+        self.keep_all_button.setObjectName("duplicateKeepAllButton")
+        self.mark_reviewed_button = QPushButton("Mark Reviewed")
+        self.mark_reviewed_button.setObjectName("duplicateMarkReviewedButton")
+        self.select_preferred_button = QPushButton("Select Preferred")
+        self.select_preferred_button.setObjectName("duplicateSelectPreferredButton")
+
+        self.open_in_finder_button.clicked.connect(self._open_selected_in_finder)
+        self.keep_all_button.clicked.connect(self._keep_all)
+        self.mark_reviewed_button.clicked.connect(self._mark_reviewed)
+        self.select_preferred_button.clicked.connect(self._select_preferred)
+
+        previews_layout = QHBoxLayout()
+        previews_layout.addWidget(self.left_preview)
+        previews_layout.addWidget(self.right_preview)
+
+        action_layout = QHBoxLayout()
+        action_layout.addWidget(self.open_in_finder_button)
+        action_layout.addWidget(self.keep_all_button)
+        action_layout.addWidget(self.mark_reviewed_button)
+        action_layout.addWidget(self.select_preferred_button)
+
+        detail_layout = QVBoxLayout()
+        detail_layout.addWidget(self.status_label)
+        detail_layout.addWidget(self.reviewed_label)
+        detail_layout.addWidget(self.preferred_label)
+        detail_layout.addLayout(previews_layout)
+        detail_layout.addLayout(action_layout)
+        detail_layout.addStretch(1)
+
+        content_layout = QHBoxLayout()
+        content_layout.addWidget(self.group_list, 1)
+        content_layout.addLayout(detail_layout, 3)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(16)
+        layout.addWidget(title_label)
+        layout.addLayout(content_layout, 1)
+        self._set_actions_enabled(False)
+
+    def load_duplicate_groups(self) -> None:
+        current_group_id = (
+            self._selected_group.id if self._selected_group is not None else None
+        )
+        with self._session_factory_provider()() as session:
+            self._groups = PhotoRepository(session).list_duplicate_groups()
+
+        self.group_list.clear()
+        for index, duplicate_group in enumerate(self._groups, start=1):
+            item = QListWidgetItem(
+                f"Group {index} - {_format_duplicate_status(duplicate_group)}",
+            )
+            self.group_list.addItem(item)
+
+        if not self._groups:
+            self._show_group(-1)
+            return
+
+        selected_index = 0
+        if current_group_id is not None:
+            for index, duplicate_group in enumerate(self._groups):
+                if duplicate_group.id == current_group_id:
+                    selected_index = index
+                    break
+        self.group_list.setCurrentRow(selected_index)
+
+    def _show_group(self, row: int) -> None:
+        if row < 0 or row >= len(self._groups):
+            self._selected_group = None
+            self._selected_photo = None
+            self.status_label.setText("No duplicate groups")
+            self.reviewed_label.setText("-")
+            self.preferred_label.setText("-")
+            self.left_preview.set_photo(None, preferred_photo_id=None)
+            self.right_preview.set_photo(None, preferred_photo_id=None)
+            self._set_actions_enabled(False)
+            return
+
+        self._selected_group = self._groups[row]
+        self._selected_photo = self._selected_group.photos[0]
+        self.status_label.setText(_format_duplicate_status(self._selected_group))
+        self.reviewed_label.setText(
+            "Reviewed" if self._selected_group.reviewed else "Needs review",
+        )
+        self.preferred_label.setText(
+            _format_preferred_photo(self._selected_group),
+        )
+        self.left_preview.set_photo(
+            self._photo_at(0),
+            preferred_photo_id=self._selected_group.preferred_photo_id,
+        )
+        self.right_preview.set_photo(
+            self._photo_at(1),
+            preferred_photo_id=self._selected_group.preferred_photo_id,
+        )
+        self.left_preview.set_selected(True)
+        self.right_preview.set_selected(False)
+        self._set_actions_enabled(True)
+
+    def _photo_at(self, index: int) -> DuplicatePhotoData | None:
+        if self._selected_group is None or index >= len(self._selected_group.photos):
+            return None
+        return self._selected_group.photos[index]
+
+    def _select_photo(self, photo: DuplicatePhotoData) -> None:
+        self._selected_photo = photo
+        self.left_preview.set_selected(self.left_preview.photo_id == photo.id)
+        self.right_preview.set_selected(self.right_preview.photo_id == photo.id)
+
+    def _open_selected_in_finder(self) -> None:
+        if self._selected_photo is None:
+            return
+        QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(Path(self._selected_photo.original_path).parent)),
+        )
+
+    def _keep_all(self) -> None:
+        if self._selected_group is None:
+            return
+        with self._session_factory_provider()() as session:
+            PhotoRepository(session).keep_all_duplicate_group_photos(
+                self._selected_group.id,
+            )
+        self.load_duplicate_groups()
+
+    def _mark_reviewed(self) -> None:
+        if self._selected_group is None:
+            return
+        with self._session_factory_provider()() as session:
+            PhotoRepository(session).mark_duplicate_group_reviewed(
+                self._selected_group.id,
+            )
+        self.load_duplicate_groups()
+
+    def _select_preferred(self) -> None:
+        if self._selected_group is None or self._selected_photo is None:
+            return
+        with self._session_factory_provider()() as session:
+            PhotoRepository(session).select_preferred_duplicate_photo(
+                self._selected_group.id,
+                self._selected_photo.id,
+            )
+        self.load_duplicate_groups()
+
+    def _set_actions_enabled(self, enabled: bool) -> None:
+        self.open_in_finder_button.setEnabled(enabled)
+        self.keep_all_button.setEnabled(enabled)
+        self.mark_reviewed_button.setEnabled(enabled)
+        self.select_preferred_button.setEnabled(enabled)
+
+
+class DuplicatePreviewPanel(QFrame):
+    selected = Signal(object)
+
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        self.photo_id: int | None = None
+        self._photo: DuplicatePhotoData | None = None
+        self.setObjectName("duplicatePreviewPanel")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("duplicatePreviewTitle")
+        self.preview_label = QLabel("No photo")
+        self.preview_label.setObjectName("duplicatePreviewImage")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setFixedSize(QSize(240, 180))
+        self.filename_label = QLabel("-")
+        self.filename_label.setObjectName("duplicateFilename")
+        self.dimensions_label = QLabel("-")
+        self.dimensions_label.setObjectName("duplicateDimensions")
+        self.file_size_label = QLabel("-")
+        self.file_size_label.setObjectName("duplicateFileSize")
+        self.blur_score_label = QLabel("-")
+        self.blur_score_label.setObjectName("duplicateBlurScore")
+        self.preferred_label = QLabel("")
+        self.preferred_label.setObjectName("duplicatePreferredBadge")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.preview_label)
+        layout.addWidget(self.preferred_label)
+        layout.addWidget(self.filename_label)
+        layout.addWidget(self.dimensions_label)
+        layout.addWidget(self.file_size_label)
+        layout.addWidget(self.blur_score_label)
+
+    def set_photo(
+        self,
+        photo: DuplicatePhotoData | None,
+        *,
+        preferred_photo_id: int | None,
+    ) -> None:
+        self._photo = photo
+        self.photo_id = photo.id if photo is not None else None
+        if photo is None:
+            self.preview_label.clear()
+            self.preview_label.setText("No photo")
+            self.filename_label.setText("-")
+            self.dimensions_label.setText("-")
+            self.file_size_label.setText("-")
+            self.blur_score_label.setText("-")
+            self.preferred_label.setText("")
+            return
+
+        self._set_preview(photo)
+        self.filename_label.setText(photo.filename)
+        self.dimensions_label.setText(_format_duplicate_dimensions(photo))
+        self.file_size_label.setText(_format_file_size(photo.file_size))
+        self.blur_score_label.setText(_format_optional_number(photo.blur_score))
+        self.preferred_label.setText(
+            "Preferred" if preferred_photo_id == photo.id else "",
+        )
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+
+    def mousePressEvent(self, event: object) -> None:
+        if self._photo is not None:
+            self.selected.emit(self._photo)
+        super().mousePressEvent(event)
+
+    def _set_preview(self, photo: DuplicatePhotoData) -> None:
+        preview_path = photo.thumbnail_path or photo.original_path
+        if photo.missing_file:
+            self.preview_label.clear()
+            self.preview_label.setText("Missing file")
+            return
+
+        pixmap = QPixmap(preview_path)
+        if pixmap.isNull():
+            self.preview_label.clear()
+            self.preview_label.setText("Preview unavailable")
+            return
+
+        self.preview_label.setText("")
+        self.preview_label.setPixmap(
+            pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ),
+        )
+
+
 class PlaceholderPage(QWidget):
     def __init__(self, title: str) -> None:
         super().__init__()
@@ -631,6 +922,27 @@ def _format_blur_badge(value: float | None) -> str:
     if value is None:
         return ""
     return f"Blur {value:.0f}"
+
+
+def _format_duplicate_status(duplicate_group: DuplicateGroupData) -> str:
+    if duplicate_group.classification == "exact":
+        return "Exact duplicate"
+    return "Likely duplicate"
+
+
+def _format_preferred_photo(duplicate_group: DuplicateGroupData) -> str:
+    if duplicate_group.preferred_photo_id is None:
+        return "Preferred: none"
+    for photo in duplicate_group.photos:
+        if photo.id == duplicate_group.preferred_photo_id:
+            return f"Preferred: {photo.filename}"
+    return "Preferred: unknown"
+
+
+def _format_duplicate_dimensions(photo: DuplicatePhotoData) -> str:
+    if photo.width is None or photo.height is None:
+        return "-"
+    return _format_dimensions((photo.width, photo.height))
 
 
 def _format_dimensions(dimensions: tuple[int, int] | None) -> str:

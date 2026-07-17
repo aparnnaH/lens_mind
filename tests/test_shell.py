@@ -17,6 +17,9 @@ from lensmind.db.repository import (  # noqa: E402
     PhotoRepository,
     initialize_sqlite,
 )
+from lensmind.services.duplicate_detection import (
+    DuplicateDetectionService,  # noqa: E402
+)
 from lensmind.ui import shell  # noqa: E402
 from lensmind.ui.thumbnail_loader import ThumbnailLoadResult  # noqa: E402
 
@@ -321,6 +324,102 @@ def test_photo_details_inspector_copies_original_path(
     inspector.copy_path_button.click()
 
     assert QApplication.clipboard().text() == str(original_path)
+
+
+def test_duplicates_page_shows_group_navigation_and_side_by_side_details(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    QImage(12, 10, QImage.Format.Format_RGB32).save(str(first_path))
+    QImage(12, 10, QImage.Format.Format_RGB32).save(str(second_path))
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(first_path),
+                filename="first.png",
+                file_size=1024,
+                sha256="a" * 64,
+                width=12,
+                height=10,
+                blur_score=12.5,
+            ),
+        )
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(second_path),
+                filename="second.png",
+                file_size=2048,
+                sha256="a" * 64,
+                width=12,
+                height=10,
+                blur_score=18.5,
+            ),
+        )
+        DuplicateDetectionService(session).rebuild_duplicate_groups()
+
+    page = shell.DuplicatesPage(lambda: session_factory)
+    page.load_duplicate_groups()
+    app.processEvents()
+
+    assert page.group_list.count() == 1
+    assert page.group_list.item(0).text() == "Group 1 - Exact duplicate"
+    assert page.status_label.text() == "Exact duplicate"
+    assert page.left_preview.filename_label.text() == "first.png"
+    assert page.right_preview.filename_label.text() == "second.png"
+    assert page.left_preview.dimensions_label.text() == "12 x 10"
+    assert page.right_preview.file_size_label.text() == "2.0 KB"
+    assert page.left_preview.blur_score_label.text() == "12.50"
+
+
+def test_duplicates_page_actions_mark_reviewed_and_select_preferred(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        first = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/first.jpg",
+                filename="first.jpg",
+                file_size=100,
+                sha256="a" * 64,
+            ),
+        )
+        second = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/second.jpg",
+                filename="second.jpg",
+                file_size=100,
+                sha256="a" * 64,
+            ),
+        )
+        DuplicateDetectionService(session).rebuild_duplicate_groups()
+
+    page = shell.DuplicatesPage(lambda: session_factory)
+    page.load_duplicate_groups()
+    app.processEvents()
+    page._select_photo(page._selected_group.photos[1])
+    page.select_preferred_button.click()
+
+    with session_factory() as session:
+        group = PhotoRepository(session).list_duplicate_groups()[0]
+
+    assert first.id != second.id
+    assert group.reviewed is True
+    assert group.preferred_photo_id == second.id
+
+    page.keep_all_button.click()
+    with session_factory() as session:
+        group = PhotoRepository(session).list_duplicate_groups()[0]
+
+    assert group.reviewed is True
+    assert group.preferred_photo_id is None
 
 
 def test_photo_grid_item_shows_placeholder_while_thumbnail_loads(

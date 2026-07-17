@@ -13,6 +13,8 @@ def test_models_create_expected_tables() -> None:
     assert table_names == {
         "album_photos",
         "albums",
+        "duplicate_group_photos",
+        "duplicate_groups",
         "indexing_runs",
         "photos",
         "source_folders",
@@ -27,6 +29,7 @@ def test_photo_model_has_requested_columns() -> None:
         "filename",
         "file_size",
         "sha256",
+        "perceptual_hash",
         "capture_timestamp",
         "timestamp_source",
         "width",
