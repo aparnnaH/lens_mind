@@ -235,6 +235,33 @@ def test_record_indexing_run(tmp_path: Path) -> None:
     assert indexing_run.files_added == 4
 
 
+def test_record_and_list_evaluation_runs(tmp_path: Path) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    first_report = {
+        "version": 1,
+        "top_k": 5,
+        "metrics": {"precision_at_5": 0.5},
+        "queries": [],
+    }
+    second_report = {
+        "version": 1,
+        "top_k": 10,
+        "metrics": {"precision_at_10": 0.7},
+        "queries": [],
+    }
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        first = repository.record_evaluation_run(first_report)
+        second = repository.record_evaluation_run(second_report)
+        runs = repository.list_evaluation_runs()
+
+    assert {first.id, second.id} == {run.id for run in runs}
+    assert runs[0].report == second_report
+    assert runs[1].report == first_report
+    assert runs[0].created_at is not None
+
+
 def test_photo_embedding_cache_uses_photo_hash_and_model_config(
     tmp_path: Path,
 ) -> None:

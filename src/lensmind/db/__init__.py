@@ -6,11 +6,13 @@ from lensmind.db.models import (
     Base,
     DuplicateGroup,
     DuplicateGroupPhoto,
+    EvaluationRun,
     IndexingRun,
     Photo,
     SourceFolder,
 )
 from lensmind.db.repository import (
+    EvaluationRunData,
     PhotoData,
     PhotoRepository,
     create_sqlite_engine,
@@ -23,6 +25,8 @@ __all__ = [
     "Base",
     "DuplicateGroup",
     "DuplicateGroupPhoto",
+    "EvaluationRun",
+    "EvaluationRunData",
     "IndexingRun",
     "Photo",
     "PhotoData",

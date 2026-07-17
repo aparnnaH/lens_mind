@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from lensmind.db.models import (
     AlbumPhoto,
     Base,
     DuplicateGroup,
+    EvaluationRun,
     IndexingRun,
     Photo,
     PhotoEmbedding,
@@ -114,6 +116,13 @@ class StoredPhotoEmbeddingData:
     vector_dimension: int
     embedding_data: bytes
     generated_at: datetime
+
+
+@dataclass(frozen=True)
+class EvaluationRunData:
+    id: int
+    report: dict[str, object]
+    created_at: datetime
 
 
 def initialize_sqlite(database_path: Path | str) -> sessionmaker[Session]:
@@ -550,6 +559,30 @@ class PhotoRepository:
         self._session.add(indexing_run)
         self._session.commit()
         return indexing_run
+
+    def record_evaluation_run(self, report: dict[str, object]) -> EvaluationRun:
+        evaluation_run = EvaluationRun(
+            report_json=json.dumps(report, sort_keys=True),
+        )
+        self._session.add(evaluation_run)
+        self._session.commit()
+        return evaluation_run
+
+    def list_evaluation_runs(self) -> list[EvaluationRunData]:
+        runs = self._session.scalars(
+            select(EvaluationRun).order_by(
+                EvaluationRun.created_at.desc(),
+                EvaluationRun.id.desc(),
+            ),
+        )
+        return [
+            EvaluationRunData(
+                id=run.id,
+                report=json.loads(run.report_json),
+                created_at=run.created_at,
+            )
+            for run in runs
+        ]
 
     def _duplicate_group_data(
         self,

@@ -9,7 +9,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QImage  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QTableWidget  # noqa: E402
 
 from lensmind.db.models import Photo  # noqa: E402
 from lensmind.db.repository import (  # noqa: E402
@@ -104,6 +104,64 @@ def test_indexing_page_displays_import_progress(app: QApplication, tmp_path) -> 
     assert page.progress_bar.value() == 2
     assert page.progress_bar.maximum() == 4
     assert page.cancel_button.isEnabled()
+
+
+def test_evaluation_results_page_displays_latest_and_previous_runs(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        repository.record_evaluation_run(
+            {
+                "version": 1,
+                "top_k": 5,
+                "metrics": {
+                    "precision_at_5": 0.4,
+                    "recall_at_5": 0.2,
+                    "mean_reciprocal_rank": 0.5,
+                    "average_search_latency_ms": 12.34,
+                    "duplicate_f1": 0.25,
+                },
+                "queries": [],
+            },
+        )
+        repository.record_evaluation_run(
+            {
+                "version": 1,
+                "top_k": 5,
+                "metrics": {
+                    "precision_at_5": 0.8,
+                    "recall_at_5": 0.6,
+                    "mean_reciprocal_rank": 1.0,
+                    "average_search_latency_ms": 8.0,
+                },
+                "queries": [],
+            },
+        )
+
+    page = shell.EvaluationResultsPage(lambda: session_factory)
+    app.processEvents()
+
+    assert page.latest_run_date_label.text() != "Unavailable"
+    assert page.findChild(QLabel, "evaluationMetric_precision").text() == "0.800"
+    assert page.findChild(QLabel, "evaluationMetric_recall").text() == "0.600"
+    assert (
+        page.findChild(QLabel, "evaluationMetric_average_search_latency_ms").text()
+        == "8.0 ms"
+    )
+    assert (
+        page.findChild(QLabel, "evaluationMetric_duplicate_f1").text()
+        == "Unavailable"
+    )
+
+    table = page.findChild(QTableWidget, "evaluationRunsTable")
+    assert table is not None
+    assert table.rowCount() == 2
+    assert table.item(0, 1).text() == "0.800"
+    assert table.item(0, 5).text() == "Unavailable"
+    assert table.item(1, 5).text() == "0.250"
 
 
 def test_import_folder_action_uses_native_folder_picker(

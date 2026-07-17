@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QPixmap
+from PySide6.QtGui import QAction, QDesktopServices, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -36,6 +38,7 @@ from lensmind.db.repository import (
     AlbumData,
     DuplicateGroupData,
     DuplicatePhotoData,
+    EvaluationRunData,
     PhotoRepository,
     TripData,
     initialize_sqlite,
@@ -130,6 +133,7 @@ class MainWindow(QMainWindow):
         self._best_photos_page = BestPhotosPage(self._get_session_factory)
         self._best_photos_page.photo_selected.connect(self._show_best_photo_details)
         self._duplicates_page = DuplicatesPage(self._get_session_factory)
+        self._evaluations_page = EvaluationResultsPage(self._get_session_factory)
         self._indexing_page = IndexingPage()
         self._pages = QStackedWidget()
         self._sidebar_entries: list[SidebarEntry] = []
@@ -199,10 +203,12 @@ class MainWindow(QMainWindow):
                 self._pages.addWidget(self._duplicates_page)
             elif title == "Indexing":
                 self._pages.addWidget(self._indexing_page)
+            elif title == "Evaluations":
+                self._pages.addWidget(self._evaluations_page)
             else:
                 self._pages.addWidget(PlaceholderPage(title))
 
-    def _build_inspector(self) -> QFrame:
+    def _build_inspector(self) -> PhotoDetailsInspector:
         return PhotoDetailsInspector()
 
     def _build_layout(self) -> None:
@@ -274,6 +280,8 @@ class MainWindow(QMainWindow):
             self._blurry_photos_page.load_photos()
         elif entry.page_title == "Duplicates":
             self._duplicates_page.load_duplicate_groups()
+        elif entry.page_title == "Evaluations":
+            self._evaluations_page.load_runs()
 
     def _refresh_album_sidebar(self) -> None:
         current_entry = self._sidebar_entries[self._sidebar.currentRow()] if (
@@ -551,7 +559,7 @@ class PhotoGridItem(QFrame):
 
         self._load_thumbnail(photo, thumbnail_loader)
 
-    def mousePressEvent(self, event: object) -> None:
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._photo_id is not None:
             self.selected.emit(self._photo_id)
         super().mousePressEvent(event)
@@ -994,6 +1002,7 @@ class TripsPage(QWidget):
             repository = PhotoRepository(session)
             if selected_trips:
                 target_trip_id = selected_trips[0].trip_id
+                assert target_trip_id is not None
                 repository.add_photos_to_trip(target_trip_id, list(selected_photo_ids))
                 repository.merge_trips(
                     target_trip_id,
@@ -1484,7 +1493,7 @@ class DuplicatePreviewPanel(QFrame):
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
 
-    def mousePressEvent(self, event: object) -> None:
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._photo is not None:
             self.selected.emit(self._photo)
         super().mousePressEvent(event)
@@ -1510,6 +1519,109 @@ class DuplicatePreviewPanel(QFrame):
                 Qt.TransformationMode.SmoothTransformation,
             ),
         )
+
+
+class EvaluationResultsPage(QWidget):
+    METRIC_FIELDS = (
+        ("precision", "Precision@K"),
+        ("recall", "Recall@K"),
+        ("mean_reciprocal_rank", "Mean Reciprocal Rank"),
+        ("average_search_latency_ms", "Average Search Latency"),
+        ("duplicate_precision", "Duplicate Precision"),
+        ("duplicate_recall", "Duplicate Recall"),
+        ("duplicate_f1", "Duplicate F1"),
+        ("blur_precision", "Blur Precision"),
+        ("blur_recall", "Blur Recall"),
+        ("blur_f1", "Blur F1"),
+    )
+
+    def __init__(
+        self,
+        session_factory_provider: Callable[[], sessionmaker[Session]],
+    ) -> None:
+        super().__init__()
+        self._session_factory_provider = session_factory_provider
+        self._metric_labels: dict[str, QLabel] = {}
+
+        title_label = QLabel("Evaluations")
+        title_label.setObjectName("pageTitle")
+
+        self.latest_run_date_label = QLabel("Unavailable")
+        self.latest_run_date_label.setObjectName("latestEvaluationRunDate")
+
+        metrics_layout = QGridLayout()
+        metrics_layout.setHorizontalSpacing(24)
+        metrics_layout.setVerticalSpacing(8)
+        for row, (metric_key, label) in enumerate(self.METRIC_FIELDS):
+            name_label = QLabel(label)
+            value_label = QLabel("Unavailable")
+            value_label.setObjectName(f"evaluationMetric_{metric_key}")
+            self._metric_labels[metric_key] = value_label
+            metrics_layout.addWidget(name_label, row, 0)
+            metrics_layout.addWidget(value_label, row, 1)
+
+        self.runs_table = QTableWidget(0, 7)
+        self.runs_table.setObjectName("evaluationRunsTable")
+        self.runs_table.setHorizontalHeaderLabels(
+            [
+                "Run Date",
+                "Precision@K",
+                "Recall@K",
+                "MRR",
+                "Latency",
+                "Duplicate F1",
+                "Blur F1",
+            ],
+        )
+        self.runs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.runs_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows,
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(12)
+        layout.addWidget(title_label)
+        layout.addWidget(QLabel("Latest Run Date"))
+        layout.addWidget(self.latest_run_date_label)
+        layout.addLayout(metrics_layout)
+        layout.addWidget(QLabel("Previous Runs"))
+        layout.addWidget(self.runs_table, 1)
+
+        self.load_runs()
+
+    def load_runs(self) -> None:
+        with self._session_factory_provider()() as session:
+            runs = PhotoRepository(session).list_evaluation_runs()
+
+        latest_run = runs[0] if runs else None
+        self.latest_run_date_label.setText(
+            _format_run_date(latest_run.created_at if latest_run else None),
+        )
+        self._set_latest_metrics(latest_run)
+        self._set_table_runs(runs)
+
+    def _set_latest_metrics(self, latest_run: EvaluationRunData | None) -> None:
+        latest_report = latest_run.report if latest_run is not None else {}
+        for metric_key, _label in self.METRIC_FIELDS:
+            self._metric_labels[metric_key].setText(
+                _format_evaluation_metric(latest_report, metric_key),
+            )
+
+    def _set_table_runs(self, runs: list[EvaluationRunData]) -> None:
+        self.runs_table.setRowCount(len(runs))
+        for row, run in enumerate(runs):
+            values = [
+                _format_run_date(run.created_at),
+                _format_evaluation_metric(run.report, "precision"),
+                _format_evaluation_metric(run.report, "recall"),
+                _format_evaluation_metric(run.report, "mean_reciprocal_rank"),
+                _format_evaluation_metric(run.report, "average_search_latency_ms"),
+                _format_evaluation_metric(run.report, "duplicate_f1"),
+                _format_evaluation_metric(run.report, "blur_f1"),
+            ]
+            for column, value in enumerate(values):
+                self.runs_table.setItem(row, column, QTableWidgetItem(value))
 
 
 class PlaceholderPage(QWidget):
@@ -1625,6 +1737,35 @@ def _default_database_path() -> Path:
 
 def _default_faiss_index_dir() -> Path:
     return Path.home() / ".lensmind" / "faiss"
+
+
+def _format_run_date(value: datetime | None) -> str:
+    if value is None:
+        return "Unavailable"
+    return value.strftime("%Y-%m-%d %H:%M")
+
+
+def _format_evaluation_metric(report: dict[str, object], metric_key: str) -> str:
+    metrics = report.get("metrics")
+    if not isinstance(metrics, dict):
+        return "Unavailable"
+
+    resolved_key = _resolve_evaluation_metric_key(report, metric_key)
+    value = metrics.get(resolved_key)
+    if not isinstance(value, int | float):
+        return "Unavailable"
+    if resolved_key == "average_search_latency_ms":
+        return f"{value:.1f} ms"
+    return f"{value:.3f}"
+
+
+def _resolve_evaluation_metric_key(report: dict[str, object], metric_key: str) -> str:
+    if metric_key not in {"precision", "recall"}:
+        return metric_key
+    top_k = report.get("top_k")
+    if type(top_k) is int and top_k > 0:
+        return f"{metric_key}_at_{top_k}"
+    return metric_key
 
 
 def _format_capture_date(capture_timestamp: datetime | None) -> str:

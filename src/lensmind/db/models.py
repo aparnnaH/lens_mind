@@ -177,6 +177,18 @@ class IndexingRun(Base):
     source_folder: Mapped[SourceFolder] = relationship(back_populates="indexing_runs")
 
 
+class EvaluationRun(Base):
+    __tablename__ = "evaluation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class DuplicateGroup(Base):
     __tablename__ = "duplicate_groups"
 
