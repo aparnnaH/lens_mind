@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
+from lensmind.db.models import Photo  # noqa: E402
+from lensmind.db.repository import (  # noqa: E402
+    PhotoData,
+    PhotoRepository,
+    initialize_sqlite,
+)
 from lensmind.ui import shell  # noqa: E402
+from lensmind.ui.thumbnail_loader import ThumbnailLoadResult  # noqa: E402
 
 
 @pytest.fixture
@@ -47,8 +56,11 @@ def test_run_application_starts_main_window(monkeypatch: pytest.MonkeyPatch) -> 
     assert events == ["app", "window", "show", "exec"]
 
 
-def test_main_window_creates_navigation_pages(app: QApplication) -> None:
-    window = shell.MainWindow()
+def test_main_window_creates_navigation_pages(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    window = shell.MainWindow(initialize_sqlite(tmp_path / "lensmind.db"))
     app.processEvents()
 
     assert window.minimumWidth() == 1100
@@ -92,10 +104,10 @@ def test_indexing_page_displays_import_progress(app: QApplication, tmp_path) -> 
 
 def test_import_folder_action_uses_native_folder_picker(
     app: QApplication,
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = shell.MainWindow()
+    window = shell.MainWindow(initialize_sqlite(tmp_path / "lensmind.db"))
     selected_folders: list[Path] = []
 
     monkeypatch.setattr(
@@ -110,3 +122,144 @@ def test_import_folder_action_uses_native_folder_picker(
     window._choose_import_folder()
 
     assert selected_folders == [tmp_path]
+
+
+def test_all_photos_page_loads_repository_records(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "first.jpg"),
+                filename="first.jpg",
+                file_size=100,
+                capture_timestamp=datetime(2026, 1, 2, 3, 4, 5),
+            ),
+        )
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "second.jpg"),
+                filename="second.jpg",
+                file_size=200,
+            ),
+        )
+
+    page = shell.AllPhotosPage(lambda: session_factory)
+
+    page.load_photos()
+    app.processEvents()
+
+    filenames = [
+        label.text()
+        for label in page.findChildren(QLabel, "photoFilename")
+    ]
+    capture_dates = [
+        label.text()
+        for label in page.findChildren(QLabel, "photoCaptureDate")
+    ]
+
+    assert filenames == ["first.jpg", "second.jpg"]
+    assert capture_dates == ["2026-01-02", "Unknown date"]
+    assert page.findChild(QLabel, "emptyAllPhotosLabel").isHidden()
+
+
+def test_photo_grid_item_shows_placeholder_while_thumbnail_loads(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    loader = FakeThumbnailLoader()
+    photo = Photo(
+        original_path=str(tmp_path / "photo.jpg"),
+        filename="photo.jpg",
+        file_size=100,
+        thumbnail_path=str(tmp_path / "thumb.png"),
+    )
+
+    item = shell.PhotoGridItem(photo, loader)
+
+    assert item.thumbnail_state_label.text() == "Loading..."
+    assert loader.requested_path == tmp_path / "thumb.png"
+
+
+def test_photo_grid_item_shows_missing_file_state(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    loader = FakeThumbnailLoader()
+    photo = Photo(
+        original_path=str(tmp_path / "missing.jpg"),
+        filename="missing.jpg",
+        file_size=100,
+        thumbnail_path=str(tmp_path / "thumb.png"),
+        missing_file=True,
+    )
+
+    item = shell.PhotoGridItem(photo, loader)
+
+    assert item.thumbnail_state_label.text() == "Missing file"
+    assert loader.requested_path is None
+
+
+def test_photo_grid_item_handles_thumbnail_error(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    loader = FakeThumbnailLoader()
+    thumbnail_path = tmp_path / "bad-thumb.png"
+    photo = Photo(
+        original_path=str(tmp_path / "photo.jpg"),
+        filename="photo.jpg",
+        file_size=100,
+        thumbnail_path=str(thumbnail_path),
+    )
+    item = shell.PhotoGridItem(photo, loader)
+
+    loader.callback(
+        ThumbnailLoadResult(
+            path=thumbnail_path,
+            status="error",
+            error="bad image",
+        ),
+    )
+
+    assert item.thumbnail_state_label.text() == "Thumbnail error"
+
+
+def test_photo_grid_item_applies_loaded_thumbnail(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    loader = FakeThumbnailLoader()
+    thumbnail_path = tmp_path / "thumb.png"
+    photo = Photo(
+        original_path=str(tmp_path / "photo.jpg"),
+        filename="photo.jpg",
+        file_size=100,
+        thumbnail_path=str(thumbnail_path),
+    )
+    item = shell.PhotoGridItem(photo, loader)
+
+    loader.callback(
+        ThumbnailLoadResult(
+            path=thumbnail_path,
+            status="loaded",
+            image=QImage(10, 10, QImage.Format.Format_RGB32),
+        ),
+    )
+
+    assert item.thumbnail_state_label.text() == ""
+    assert item.thumbnail_label.pixmap() is not None
+
+
+class FakeThumbnailLoader:
+    def __init__(self) -> None:
+        self.requested_path: Path | None = None
+        self.callback = None
+
+    def load(self, path, _size, callback):
+        self.requested_path = Path(path)
+        self.callback = callback
+        return object()

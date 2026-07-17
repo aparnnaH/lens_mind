@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QThread
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QToolBar,
@@ -25,9 +28,11 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session, sessionmaker
 
-from lensmind.db.repository import initialize_sqlite
+from lensmind.db.models import Photo
+from lensmind.db.repository import PhotoRepository, initialize_sqlite
 from lensmind.services.photo_import import PhotoImportService
 from lensmind.ui.import_worker import PhotoImportWorker
+from lensmind.ui.thumbnail_loader import ThumbnailLoader, ThumbnailLoadResult
 
 PAGE_TITLES = (
     "All Photos",
@@ -53,6 +58,7 @@ class MainWindow(QMainWindow):
         self._session_factory = session_factory
         self._import_thread: QThread | None = None
         self._import_worker: PhotoImportWorker | None = None
+        self._all_photos_page = AllPhotosPage(self._get_session_factory)
         self._indexing_page = IndexingPage()
         self._pages = QStackedWidget()
         self._sidebar = self._build_sidebar()
@@ -83,6 +89,7 @@ class MainWindow(QMainWindow):
         sidebar.setSpacing(2)
         sidebar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         sidebar.currentRowChanged.connect(self._pages.setCurrentIndex)
+        sidebar.currentRowChanged.connect(self._handle_page_changed)
 
         for title in PAGE_TITLES:
             item = QListWidgetItem(title)
@@ -93,7 +100,9 @@ class MainWindow(QMainWindow):
 
     def _build_pages(self) -> None:
         for title in PAGE_TITLES:
-            if title == "Indexing":
+            if title == "All Photos":
+                self._pages.addWidget(self._all_photos_page)
+            elif title == "Indexing":
                 self._pages.addWidget(self._indexing_page)
             else:
                 self._pages.addWidget(PlaceholderPage(title))
@@ -159,9 +168,14 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._clear_import_worker)
+        thread.finished.connect(self._all_photos_page.load_photos)
         self._indexing_page.cancel_button.clicked.connect(worker.cancel)
 
         thread.start()
+
+    def _handle_page_changed(self, row: int) -> None:
+        if PAGE_TITLES[row] == "All Photos":
+            self._all_photos_page.load_photos()
 
     def _clear_import_worker(self) -> None:
         self._indexing_page.cancel_button.clicked.disconnect()
@@ -175,6 +189,143 @@ class MainWindow(QMainWindow):
             self._session_factory = initialize_sqlite(_default_database_path())
 
         return self._session_factory
+
+
+class AllPhotosPage(QWidget):
+    def __init__(
+        self,
+        session_factory_provider: Callable[[], sessionmaker[Session]],
+    ) -> None:
+        super().__init__()
+        self._session_factory_provider = session_factory_provider
+        self._thumbnail_loader = ThumbnailLoader()
+
+        title_label = QLabel("All Photos")
+        title_label.setObjectName("pageTitle")
+
+        self._empty_label = QLabel("No photos imported yet")
+        self._empty_label.setObjectName("emptyAllPhotosLabel")
+
+        self._grid_container = QWidget()
+        self._grid = QGridLayout(self._grid_container)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(16)
+        self._grid.setVerticalSpacing(16)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self._grid_container)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(16)
+        layout.addWidget(title_label)
+        layout.addWidget(self._empty_label)
+        layout.addWidget(scroll_area, 1)
+
+    def load_photos(self) -> None:
+        self._clear_grid()
+        session_factory = self._session_factory_provider()
+        with session_factory() as session:
+            photos = PhotoRepository(session).list_photos()
+
+        self._empty_label.setVisible(not photos)
+        for index, photo in enumerate(photos):
+            row, column = divmod(index, 4)
+            self._grid.addWidget(
+                PhotoGridItem(photo, self._thumbnail_loader),
+                row,
+                column,
+            )
+
+        self._grid.setRowStretch((len(photos) // 4) + 1, 1)
+
+    def _clear_grid(self) -> None:
+        while item := self._grid.takeAt(0):
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+
+class PhotoGridItem(QFrame):
+    def __init__(self, photo: Photo, thumbnail_loader: ThumbnailLoader) -> None:
+        super().__init__()
+        self.setObjectName("photoGridItem")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFixedWidth(180)
+        self._thumbnail_path = (
+            Path(photo.thumbnail_path) if photo.thumbnail_path else None
+        )
+
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setObjectName("photoThumbnail")
+        self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumbnail_label.setFixedSize(QSize(160, 120))
+        self.thumbnail_state_label = QLabel()
+        self.thumbnail_state_label.setObjectName("photoThumbnailState")
+        self.thumbnail_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        filename_label = QLabel(photo.filename)
+        filename_label.setObjectName("photoFilename")
+        filename_label.setWordWrap(True)
+
+        capture_date_label = QLabel(_format_capture_date(photo.capture_timestamp))
+        capture_date_label.setObjectName("photoCaptureDate")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        layout.addWidget(self.thumbnail_label)
+        layout.addWidget(self.thumbnail_state_label)
+        layout.addWidget(filename_label)
+        layout.addWidget(capture_date_label)
+
+        self._load_thumbnail(photo, thumbnail_loader)
+
+    def _load_thumbnail(
+        self,
+        photo: Photo,
+        thumbnail_loader: ThumbnailLoader,
+    ) -> None:
+        if photo.missing_file:
+            self._set_thumbnail_state("Missing file", clear_image=True)
+            return
+
+        if self._thumbnail_path is None:
+            self._set_thumbnail_state("No thumbnail", clear_image=True)
+            return
+
+        self._set_thumbnail_state("Loading...", clear_image=True)
+        thumbnail_loader.load(
+            self._thumbnail_path,
+            self.thumbnail_label.size(),
+            self._handle_thumbnail_loaded,
+        )
+
+    def _handle_thumbnail_loaded(self, result: ThumbnailLoadResult) -> None:
+        if self._thumbnail_path is None or result.path != self._thumbnail_path:
+            return
+
+        if result.status == "missing":
+            self._set_thumbnail_state("Missing thumbnail", clear_image=True)
+            return
+
+        if result.status == "error" or result.image is None:
+            self._set_thumbnail_state("Thumbnail error", clear_image=True)
+            return
+
+        pixmap = QPixmap.fromImage(result.image)
+        if pixmap.isNull():
+            self._set_thumbnail_state("Thumbnail error", clear_image=True)
+            return
+
+        self.thumbnail_label.setPixmap(pixmap)
+        self._set_thumbnail_state("")
+
+    def _set_thumbnail_state(self, text: str, *, clear_image: bool = False) -> None:
+        if clear_image:
+            self.thumbnail_label.clear()
+        self.thumbnail_state_label.setText(text)
 
 
 class PlaceholderPage(QWidget):
@@ -286,6 +437,12 @@ def _default_database_path() -> Path:
     data_directory = Path.home() / ".lensmind"
     data_directory.mkdir(parents=True, exist_ok=True)
     return data_directory / "lensmind.sqlite3"
+
+
+def _format_capture_date(capture_timestamp: datetime | None) -> str:
+    if capture_timestamp is None:
+        return "Unknown date"
+    return capture_timestamp.strftime("%Y-%m-%d")
 
 
 def run_application(argv: Sequence[str] | None = None) -> int:
