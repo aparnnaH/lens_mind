@@ -72,6 +72,10 @@ class Photo(Base):
         back_populates="photo",
         cascade="all, delete-orphan",
     )
+    trip_links: Mapped[list[TripPhoto]] = relationship(
+        back_populates="photo",
+        cascade="all, delete-orphan",
+    )
     duplicate_links: Mapped[list[DuplicateGroupPhoto]] = relationship(
         back_populates="photo",
         cascade="all, delete-orphan",
@@ -88,6 +92,7 @@ class Album(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    cover_photo_id: Mapped[int | None] = mapped_column(ForeignKey("photos.id"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -98,6 +103,7 @@ class Album(Base):
         back_populates="album",
         cascade="all, delete-orphan",
     )
+    cover_photo: Mapped[Photo | None] = relationship(foreign_keys=[cover_photo_id])
 
 
 class AlbumPhoto(Base):
@@ -113,6 +119,40 @@ class AlbumPhoto(Base):
 
     album: Mapped[Album] = relationship(back_populates="photo_links")
     photo: Mapped[Photo] = relationship(back_populates="album_links")
+
+
+class Trip(Base):
+    __tablename__ = "trips"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    cover_photo_id: Mapped[int | None] = mapped_column(ForeignKey("photos.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    photo_links: Mapped[list[TripPhoto]] = relationship(
+        back_populates="trip",
+        cascade="all, delete-orphan",
+    )
+    cover_photo: Mapped[Photo | None] = relationship(foreign_keys=[cover_photo_id])
+
+
+class TripPhoto(Base):
+    __tablename__ = "trip_photos"
+
+    trip_id: Mapped[int] = mapped_column(ForeignKey("trips.id"), primary_key=True)
+    photo_id: Mapped[int] = mapped_column(ForeignKey("photos.id"), primary_key=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    trip: Mapped[Trip] = relationship(back_populates="photo_links")
+    photo: Mapped[Photo] = relationship(back_populates="trip_links")
 
 
 class IndexingRun(Base):

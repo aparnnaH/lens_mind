@@ -120,6 +120,97 @@ def test_list_blurry_photos_filters_by_threshold(tmp_path: Path) -> None:
     assert [photo.filename for photo in photos] == ["blurry.jpg"]
 
 
+def test_manual_album_repository_operations(tmp_path: Path) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        first = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/first.jpg",
+                filename="first.jpg",
+                file_size=100,
+            ),
+        )
+        second = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/second.jpg",
+                filename="second.jpg",
+                file_size=100,
+            ),
+        )
+
+        album = repository.create_album("Favorites")
+        repository.add_photos_to_album(album.id, [first.id, second.id, first.id])
+        repository.set_album_cover(album.id, second.id)
+        repository.rename_album(album.id, "Best")
+
+        albums = repository.list_albums()
+        album_photos = repository.list_album_photos(album.id)
+
+        repository.remove_photos_from_album(album.id, [second.id])
+        updated_albums = repository.list_albums()
+        updated_album_photos = repository.list_album_photos(album.id)
+
+    assert [(item.name, item.photo_count, item.cover_photo_id) for item in albums] == [
+        ("Best", 2, second.id),
+    ]
+    assert [photo.filename for photo in album_photos] == ["first.jpg", "second.jpg"]
+    assert [
+        (item.name, item.photo_count, item.cover_photo_id)
+        for item in updated_albums
+    ] == [
+        ("Best", 1, None),
+    ]
+    assert [photo.filename for photo in updated_album_photos] == ["first.jpg"]
+
+
+def test_trip_repository_operations(tmp_path: Path) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        first = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/first.jpg",
+                filename="first.jpg",
+                file_size=100,
+            ),
+        )
+        second = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/second.jpg",
+                filename="second.jpg",
+                file_size=100,
+            ),
+        )
+        third = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/third.jpg",
+                filename="third.jpg",
+                file_size=100,
+            ),
+        )
+
+        first_trip = repository.create_trip("January", [first.id, second.id])
+        second_trip = repository.create_trip("February", [third.id])
+        repository.rename_trip(first_trip.id, "Renamed")
+        repository.set_trip_cover(first_trip.id, second.id)
+        repository.merge_trips(first_trip.id, [second_trip.id])
+
+        trips = repository.list_trips()
+        trip_photos = repository.list_trip_photos(first_trip.id)
+
+    assert [(trip.name, trip.photo_count, trip.cover_photo_id) for trip in trips] == [
+        ("Renamed", 3, second.id),
+    ]
+    assert [photo.filename for photo in trip_photos] == [
+        "first.jpg",
+        "second.jpg",
+        "third.jpg",
+    ]
+
+
 def test_record_indexing_run(tmp_path: Path) -> None:
     session_factory = initialize_sqlite(tmp_path / "lensmind.db")
     started_at = datetime(2026, 1, 1, tzinfo=UTC)

@@ -243,6 +243,209 @@ def test_top_search_bar_displays_semantic_results_and_clear_search(
     assert not window.clear_search_button.isEnabled()
 
 
+def test_manual_albums_show_in_sidebar_and_use_existing_grid(
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        first = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "first.jpg"),
+                filename="first.jpg",
+                file_size=100,
+            ),
+        )
+        second = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "second.jpg"),
+                filename="second.jpg",
+                file_size=200,
+            ),
+        )
+    dialog_values = iter([("Favorites", True), ("Renamed", True)])
+    monkeypatch.setattr(
+        shell.QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: next(dialog_values),
+    )
+    window = shell.MainWindow(session_factory)
+    albums_index = shell.PAGE_TITLES.index("Albums")
+
+    window._sidebar.setCurrentRow(albums_index)
+    window._albums_page.create_album_button.click()
+    app.processEvents()
+
+    assert "  Favorites" in [
+        window._sidebar.item(index).text()
+        for index in range(window._sidebar.count())
+    ]
+
+    window._selected_photo_ids.update({first.id, second.id})
+    window._albums_page.add_selected_button.click()
+    app.processEvents()
+
+    assert [
+        label.text()
+        for label in window._albums_page.gallery.findChildren(QLabel, "photoFilename")
+    ] == ["first.jpg", "second.jpg"]
+
+    window._albums_page.gallery._handle_photo_selected(second.id)
+    window._albums_page.choose_cover_button.click()
+    window._albums_page.rename_album_button.click()
+    app.processEvents()
+
+    with session_factory() as session:
+        album = PhotoRepository(session).list_albums()[0]
+
+    assert album.name == "Renamed"
+    assert album.cover_photo_id == second.id
+    assert "  Renamed" in [
+        window._sidebar.item(index).text()
+        for index in range(window._sidebar.count())
+    ]
+
+    window._albums_page.gallery._handle_photo_selected(second.id)
+    window._albums_page.remove_selected_button.click()
+    app.processEvents()
+
+    with session_factory() as session:
+        album = PhotoRepository(session).list_albums()[0]
+
+    assert album.cover_photo_id is None
+    assert [
+        label.text()
+        for label in window._albums_page.gallery.findChildren(QLabel, "photoFilename")
+    ] == ["first.jpg"]
+
+
+def test_trips_page_accepts_renames_removes_and_sets_cover(
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "first.jpg"),
+                filename="first.jpg",
+                file_size=100,
+                capture_timestamp=datetime(2026, 1, 1, 9),
+            ),
+        )
+        second = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "second.jpg"),
+                filename="second.jpg",
+                file_size=100,
+                capture_timestamp=datetime(2026, 1, 1, 12),
+            ),
+        )
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "third.jpg"),
+                filename="third.jpg",
+                file_size=100,
+                capture_timestamp=datetime(2026, 1, 5, 9),
+            ),
+        )
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "fourth.jpg"),
+                filename="fourth.jpg",
+                file_size=100,
+                capture_timestamp=datetime(2026, 1, 5, 12),
+            ),
+        )
+    monkeypatch.setattr(
+        shell.QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: ("Winter Trip", True),
+    )
+    window = shell.MainWindow(session_factory)
+
+    window._sidebar.setCurrentRow(shell.PAGE_TITLES.index("Trips"))
+    app.processEvents()
+
+    assert [
+        window._trips_page.trip_list.item(index).text()
+        for index in range(window._trips_page.trip_list.count())
+    ] == [
+        "Suggestion: Trip 2026-01-01 (2 photos)",
+        "Suggestion: Trip 2026-01-05 (2 photos)",
+    ]
+    assert [
+        label.text()
+        for label in window._trips_page.gallery.findChildren(QLabel, "photoFilename")
+    ] == ["first.jpg", "second.jpg"]
+
+    window._trips_page.accept_button.click()
+    window._trips_page.rename_button.click()
+    window._trips_page.gallery._handle_photo_selected(second.id)
+    window._trips_page.choose_cover_button.click()
+    window._trips_page.trip_list.setCurrentRow(1)
+    window._trips_page.remove_suggestion_button.click()
+    app.processEvents()
+
+    with session_factory() as session:
+        trips = PhotoRepository(session).list_trips()
+
+    assert [(trip.name, trip.photo_count, trip.cover_photo_id) for trip in trips] == [
+        ("Winter Trip", 2, second.id),
+    ]
+    assert [
+        window._trips_page.trip_list.item(index).text()
+        for index in range(window._trips_page.trip_list.count())
+    ] == ["Trip: Winter Trip (2 photos)"]
+
+
+def test_trips_page_merges_selected_suggestions(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        for filename, capture_timestamp in (
+            ("first.jpg", datetime(2026, 2, 1, 9)),
+            ("second.jpg", datetime(2026, 2, 1, 12)),
+            ("third.jpg", datetime(2026, 2, 5, 9)),
+            ("fourth.jpg", datetime(2026, 2, 5, 12)),
+        ):
+            repository.add_or_update_photo(
+                PhotoData(
+                    original_path=str(tmp_path / filename),
+                    filename=filename,
+                    file_size=100,
+                    capture_timestamp=capture_timestamp,
+                ),
+            )
+    window = shell.MainWindow(session_factory)
+
+    window._sidebar.setCurrentRow(shell.PAGE_TITLES.index("Trips"))
+    window._trips_page.trip_list.item(0).setSelected(True)
+    window._trips_page.trip_list.item(1).setSelected(True)
+    window._trips_page.merge_button.click()
+    app.processEvents()
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        trips = repository.list_trips()
+        trip_photos = repository.list_trip_photos(trips[0].id)
+
+    assert [(trip.name, trip.photo_count) for trip in trips] == [("Merged Trip", 4)]
+    assert [photo.filename for photo in trip_photos] == [
+        "first.jpg",
+        "second.jpg",
+        "third.jpg",
+        "fourth.jpg",
+    ]
+
+
 def test_blurry_photos_page_reuses_gallery_with_blur_badges(
     app: QApplication,
     tmp_path: Path,

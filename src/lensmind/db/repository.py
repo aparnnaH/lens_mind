@@ -8,12 +8,16 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from lensmind.db.models import (
+    Album,
+    AlbumPhoto,
     Base,
     DuplicateGroup,
     IndexingRun,
     Photo,
     PhotoEmbedding,
     SourceFolder,
+    Trip,
+    TripPhoto,
 )
 
 
@@ -60,6 +64,22 @@ class DuplicateGroupData:
     reviewed: bool
     preferred_photo_id: int | None
     photos: tuple[DuplicatePhotoData, ...]
+
+
+@dataclass(frozen=True)
+class AlbumData:
+    id: int
+    name: str
+    cover_photo_id: int | None
+    photo_count: int
+
+
+@dataclass(frozen=True)
+class TripData:
+    id: int
+    name: str
+    cover_photo_id: int | None
+    photo_count: int
 
 
 @dataclass(frozen=True)
@@ -173,6 +193,182 @@ class PhotoRepository:
                 .order_by(Photo.id),
             ),
         )
+
+    def create_album(self, name: str) -> Album:
+        album = Album(name=name.strip() or "Untitled Album")
+        self._session.add(album)
+        self._session.commit()
+        return album
+
+    def rename_album(self, album_id: int, name: str) -> Album | None:
+        album = self._session.get(Album, album_id)
+        if album is None:
+            return None
+
+        album.name = name.strip() or "Untitled Album"
+        self._session.commit()
+        return album
+
+    def list_albums(self) -> list[AlbumData]:
+        albums = list(self._session.scalars(select(Album).order_by(Album.name)))
+        return [
+            AlbumData(
+                id=album.id,
+                name=album.name,
+                cover_photo_id=album.cover_photo_id,
+                photo_count=len(self.list_album_photos(album.id)),
+            )
+            for album in albums
+        ]
+
+    def list_album_photos(self, album_id: int) -> list[Photo]:
+        links = self._session.scalars(
+            select(AlbumPhoto)
+            .where(AlbumPhoto.album_id == album_id)
+            .order_by(AlbumPhoto.added_at, AlbumPhoto.photo_id),
+        )
+        return [link.photo for link in links]
+
+    def add_photos_to_album(self, album_id: int, photo_ids: list[int]) -> None:
+        album = self._session.get(Album, album_id)
+        if album is None:
+            return
+
+        existing_photo_ids = {
+            link.photo_id
+            for link in album.photo_links
+        }
+        for photo_id in dict.fromkeys(photo_ids):
+            if photo_id in existing_photo_ids:
+                continue
+            if self._session.get(Photo, photo_id) is None:
+                continue
+            self._session.add(AlbumPhoto(album_id=album_id, photo_id=photo_id))
+
+        if album.cover_photo_id is None and photo_ids:
+            album.cover_photo_id = photo_ids[0]
+        self._session.commit()
+
+    def remove_photos_from_album(self, album_id: int, photo_ids: list[int]) -> None:
+        if not photo_ids:
+            return
+
+        photo_id_set = set(photo_ids)
+        links = self._session.scalars(
+            select(AlbumPhoto)
+            .where(AlbumPhoto.album_id == album_id)
+            .where(AlbumPhoto.photo_id.in_(photo_id_set)),
+        )
+        for link in links:
+            self._session.delete(link)
+
+        album = self._session.get(Album, album_id)
+        if album is not None and album.cover_photo_id in photo_id_set:
+            album.cover_photo_id = None
+        self._session.commit()
+
+    def set_album_cover(self, album_id: int, photo_id: int) -> None:
+        album = self._session.get(Album, album_id)
+        if album is None:
+            return
+        linked = self._session.get(
+            AlbumPhoto,
+            {"album_id": album_id, "photo_id": photo_id},
+        )
+        if linked is None:
+            return
+
+        album.cover_photo_id = photo_id
+        self._session.commit()
+
+    def create_trip(self, name: str, photo_ids: list[int]) -> Trip:
+        trip = Trip(name=name.strip() or "Untitled Trip")
+        self._session.add(trip)
+        self._session.flush()
+        self._add_photos_to_trip(trip, photo_ids)
+        if trip.cover_photo_id is None and photo_ids:
+            trip.cover_photo_id = photo_ids[0]
+        self._session.commit()
+        return trip
+
+    def rename_trip(self, trip_id: int, name: str) -> Trip | None:
+        trip = self._session.get(Trip, trip_id)
+        if trip is None:
+            return None
+
+        trip.name = name.strip() or "Untitled Trip"
+        self._session.commit()
+        return trip
+
+    def list_trips(self) -> list[TripData]:
+        trips = list(self._session.scalars(select(Trip).order_by(Trip.name)))
+        return [
+            TripData(
+                id=trip.id,
+                name=trip.name,
+                cover_photo_id=trip.cover_photo_id,
+                photo_count=len(self.list_trip_photos(trip.id)),
+            )
+            for trip in trips
+        ]
+
+    def list_trip_photos(self, trip_id: int) -> list[Photo]:
+        links = self._session.scalars(
+            select(TripPhoto)
+            .where(TripPhoto.trip_id == trip_id)
+            .order_by(TripPhoto.added_at, TripPhoto.photo_id),
+        )
+        return [link.photo for link in links]
+
+    def add_photos_to_trip(self, trip_id: int, photo_ids: list[int]) -> None:
+        trip = self._session.get(Trip, trip_id)
+        if trip is None:
+            return
+
+        self._add_photos_to_trip(trip, photo_ids)
+        if trip.cover_photo_id is None and photo_ids:
+            trip.cover_photo_id = photo_ids[0]
+        self._session.commit()
+
+    def merge_trips(self, target_trip_id: int, source_trip_ids: list[int]) -> None:
+        target_trip = self._session.get(Trip, target_trip_id)
+        if target_trip is None:
+            return
+
+        for source_trip_id in dict.fromkeys(source_trip_ids):
+            if source_trip_id == target_trip_id:
+                continue
+            source_trip = self._session.get(Trip, source_trip_id)
+            if source_trip is None:
+                continue
+            self._add_photos_to_trip(
+                target_trip,
+                [photo.id for photo in self.list_trip_photos(source_trip_id)],
+            )
+            self._session.delete(source_trip)
+        self._session.commit()
+
+    def delete_trip(self, trip_id: int) -> None:
+        trip = self._session.get(Trip, trip_id)
+        if trip is None:
+            return
+
+        self._session.delete(trip)
+        self._session.commit()
+
+    def set_trip_cover(self, trip_id: int, photo_id: int) -> None:
+        trip = self._session.get(Trip, trip_id)
+        if trip is None:
+            return
+        linked = self._session.get(
+            TripPhoto,
+            {"trip_id": trip_id, "photo_id": photo_id},
+        )
+        if linked is None:
+            return
+
+        trip.cover_photo_id = photo_id
+        self._session.commit()
 
     def list_duplicate_groups(self) -> list[DuplicateGroupData]:
         groups = list(
@@ -400,3 +596,16 @@ class PhotoRepository:
             .where(PhotoEmbedding.model_name == model_name)
             .where(PhotoEmbedding.model_config == model_config),
         )
+
+    def _add_photos_to_trip(self, trip: Trip, photo_ids: list[int]) -> None:
+        existing_photo_ids = {
+            link.photo_id
+            for link in trip.photo_links
+        }
+        for photo_id in dict.fromkeys(photo_ids):
+            if photo_id in existing_photo_ids:
+                continue
+            if self._session.get(Photo, photo_id) is None:
+                continue
+            self._session.add(TripPhoto(trip_id=trip.id, photo_id=photo_id))
+            existing_photo_ids.add(photo_id)

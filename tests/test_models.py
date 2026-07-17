@@ -19,6 +19,8 @@ def test_models_create_expected_tables() -> None:
         "photo_embeddings",
         "photos",
         "source_folders",
+        "trip_photos",
+        "trips",
     }
 
 
