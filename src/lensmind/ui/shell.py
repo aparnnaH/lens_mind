@@ -51,6 +51,7 @@ from lensmind.services.openclip_embeddings import (
 )
 from lensmind.services.photo_display import PhotoDisplayInfo, PhotoDisplayService
 from lensmind.services.photo_import import PhotoImportService
+from lensmind.services.photo_ranking import PhotoRank, PhotoRankingService
 from lensmind.services.trip_suggestions import SuggestedTrip, TripSuggestionService
 from lensmind.ui.import_worker import PhotoImportWorker
 from lensmind.ui.thumbnail_loader import ThumbnailLoader, ThumbnailLoadResult
@@ -126,6 +127,8 @@ class MainWindow(QMainWindow):
             albums_changed_callback=self._refresh_album_sidebar,
         )
         self._albums_page.photo_selected.connect(self._show_photo_details)
+        self._best_photos_page = BestPhotosPage(self._get_session_factory)
+        self._best_photos_page.photo_selected.connect(self._show_best_photo_details)
         self._duplicates_page = DuplicatesPage(self._get_session_factory)
         self._indexing_page = IndexingPage()
         self._pages = QStackedWidget()
@@ -188,6 +191,8 @@ class MainWindow(QMainWindow):
                 self._pages.addWidget(self._trips_page)
             elif title == "Albums":
                 self._pages.addWidget(self._albums_page)
+            elif title == "Best Photos":
+                self._pages.addWidget(self._best_photos_page)
             elif title == "Blurry Photos":
                 self._pages.addWidget(self._blurry_photos_page)
             elif title == "Duplicates":
@@ -263,6 +268,8 @@ class MainWindow(QMainWindow):
             self._trips_page.load_trips()
         elif entry.page_title == "Albums":
             self._albums_page.load_album(entry.album_id)
+        elif entry.page_title == "Best Photos":
+            self._best_photos_page.load_recommendations()
         elif entry.page_title == "Blurry Photos":
             self._blurry_photos_page.load_photos()
         elif entry.page_title == "Duplicates":
@@ -324,6 +331,12 @@ class MainWindow(QMainWindow):
             display_info = PhotoDisplayService(session).get_photo_display_info(photo_id)
 
         self._inspector.set_photo(display_info)
+
+    def _show_best_photo_details(self, photo_id: int) -> None:
+        self._show_photo_details(photo_id)
+        self._inspector.set_recommendation_reasons(
+            self._best_photos_page.reasons_for_photo(photo_id),
+        )
 
     def _run_semantic_search(self) -> None:
         query = self.search_input.text()
@@ -613,6 +626,9 @@ class PhotoDetailsInspector(QFrame):
             "source_folder": _detail_value_label("inspectorSourceFolder"),
             "missing_file": _detail_value_label("inspectorMissingFile"),
             "preview_path": _detail_value_label("inspectorPreviewPath"),
+            "recommendation_reasons": _detail_value_label(
+                "inspectorRecommendationReasons",
+            ),
         }
 
         self.open_in_finder_button = QPushButton("Open in Finder")
@@ -641,6 +657,7 @@ class PhotoDetailsInspector(QFrame):
             ("Camera", "camera_details"),
             ("GPS", "gps_coordinates"),
             ("Blur score", "blur_score"),
+            ("Recommendation reasons", "recommendation_reasons"),
             ("Source folder", "source_folder"),
             ("Missing file", "missing_file"),
         ):
@@ -678,6 +695,7 @@ class PhotoDetailsInspector(QFrame):
             _format_gps_coordinates(display_info.gps_coordinates),
         )
         self._fields["blur_score"].setText(_format_optional_number(display_info.blur_score))
+        self._fields["recommendation_reasons"].setText("-")
         self._fields["source_folder"].setText(
             _format_optional_path(display_info.source_folder),
         )
@@ -706,6 +724,81 @@ class PhotoDetailsInspector(QFrame):
         self.open_in_finder_button.setEnabled(enabled)
         self.open_original_button.setEnabled(enabled)
         self.copy_path_button.setEnabled(enabled)
+
+    def set_recommendation_reasons(self, reasons: tuple[str, ...]) -> None:
+        self._fields["recommendation_reasons"].setText(
+            "\n".join(reasons) if reasons else "-",
+        )
+
+
+class BestPhotosPage(QWidget):
+    photo_selected = Signal(int)
+
+    def __init__(
+        self,
+        session_factory_provider: Callable[[], sessionmaker[Session]],
+    ) -> None:
+        super().__init__()
+        self._session_factory_provider = session_factory_provider
+        self._hidden_photo_ids: set[int] = set()
+        self._ranks_by_photo_id: dict[int, PhotoRank] = {}
+        self.gallery = AllPhotosPage(
+            session_factory_provider,
+            title="Best Photos",
+            empty_text="No recommendations yet",
+            photos_loader=self._load_ranked_photos,
+        )
+        self.gallery.photo_selected.connect(self.photo_selected)
+
+        self.hide_recommendation_button = QPushButton("Hide Recommendation")
+        self.hide_recommendation_button.setObjectName("hideRecommendationButton")
+        self.hide_recommendation_button.clicked.connect(self._hide_selected)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.hide_recommendation_button)
+        layout.addWidget(self.gallery, 1)
+
+    def load_recommendations(self) -> None:
+        self.gallery.load_photos()
+
+    def reasons_for_photo(self, photo_id: int) -> tuple[str, ...]:
+        rank = self._ranks_by_photo_id.get(photo_id)
+        if rank is None:
+            return ()
+        return rank.reasons
+
+    def _load_ranked_photos(self, repository: PhotoRepository) -> list[Photo]:
+        photos_by_id = {
+            photo.id: photo
+            for photo in repository.list_photos()
+        }
+        ranks = PhotoRankingService(repository._session).rank_photos(
+            list(photos_by_id.values()),
+        )
+        visible_ranks = [
+            rank
+            for rank in ranks
+            if rank.photo_id not in self._hidden_photo_ids
+        ]
+        self._ranks_by_photo_id = {
+            rank.photo_id: rank
+            for rank in visible_ranks
+        }
+        return [
+            photos_by_id[rank.photo_id]
+            for rank in visible_ranks
+            if rank.photo_id in photos_by_id
+        ]
+
+    def _hide_selected(self) -> None:
+        selected_photo_ids = self.gallery.selected_photo_ids()
+        if not selected_photo_ids:
+            return
+
+        self._hidden_photo_ids.update(selected_photo_ids)
+        self.load_recommendations()
 
 
 class TripsPage(QWidget):

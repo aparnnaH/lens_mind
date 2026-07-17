@@ -446,6 +446,73 @@ def test_trips_page_merges_selected_suggestions(
     ]
 
 
+def test_best_photos_page_shows_reasons_and_hides_recommendation(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        weaker = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "weaker.jpg"),
+                filename="weaker.jpg",
+                file_size=100,
+                width=1200,
+                height=800,
+                blur_score=50.0,
+            ),
+        )
+        stronger = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "stronger.jpg"),
+                filename="stronger.jpg",
+                file_size=100,
+                width=4000,
+                height=3000,
+                blur_score=500.0,
+            ),
+        )
+    window = shell.MainWindow(session_factory)
+
+    window._sidebar.setCurrentRow(shell.PAGE_TITLES.index("Best Photos"))
+    app.processEvents()
+
+    assert [
+        label.text()
+        for label in window._best_photos_page.gallery.findChildren(
+            QLabel,
+            "photoFilename",
+        )
+    ] == ["stronger.jpg", "weaker.jpg"]
+
+    window._best_photos_page.gallery._handle_photo_selected(stronger.id)
+    app.processEvents()
+
+    assert window._inspector.findChild(
+        QLabel,
+        "inspectorRecommendationReasons",
+    ).text() == (
+        "Higher blur score\n"
+        "Higher resolution\n"
+        "No duplicate preference\n"
+        "No exposure clipping data"
+    )
+
+    window._best_photos_page.hide_recommendation_button.click()
+    app.processEvents()
+
+    assert [
+        label.text()
+        for label in window._best_photos_page.gallery.findChildren(
+            QLabel,
+            "photoFilename",
+        )
+    ] == ["weaker.jpg"]
+    assert weaker.id in window._best_photos_page._ranks_by_photo_id
+    assert stronger.id not in window._best_photos_page._ranks_by_photo_id
+
+
 def test_blurry_photos_page_reuses_gallery_with_blur_badges(
     app: QApplication,
     tmp_path: Path,
