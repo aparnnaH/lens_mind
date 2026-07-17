@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Minimal desktop application foundation for LensMind."
 requires-python = ">=3.11"
 dependencies = [
+    "Pillow>=10.4",
     "PySide6>=6.7",
     "SQLAlchemy>=2.0",
 ]
