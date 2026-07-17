@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Minimal desktop application foundation for LensMind."
 requires-python = ">=3.11"
 dependencies = [
+    "faiss-cpu>=1.8",
     "numpy>=1.26,<2",
     "open_clip_torch>=3.3",
     "opencv-python-headless>=4.10",

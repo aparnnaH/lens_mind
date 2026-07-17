@@ -20,6 +20,7 @@ from lensmind.db.repository import (  # noqa: E402
 from lensmind.services.duplicate_detection import (
     DuplicateDetectionService,  # noqa: E402
 )
+from lensmind.services.faiss_search import FaissSearchResult  # noqa: E402
 from lensmind.ui import shell  # noqa: E402
 from lensmind.ui.thumbnail_loader import ThumbnailLoadResult  # noqa: E402
 
@@ -167,6 +168,79 @@ def test_all_photos_page_loads_repository_records(
     assert filenames == ["first.jpg", "second.jpg"]
     assert capture_dates == ["2026-01-02", "Unknown date"]
     assert page.findChild(QLabel, "emptyAllPhotosLabel").isHidden()
+
+
+def test_top_search_bar_displays_semantic_results_and_clear_search(
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        first = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "first.jpg"),
+                filename="first.jpg",
+                file_size=100,
+            ),
+        )
+        second = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "second.jpg"),
+                filename="second.jpg",
+                file_size=200,
+            ),
+        )
+    fake_search_service = FakeSemanticSearchService(
+        [
+            FaissSearchResult(photo_id=second.id, score=0.91),
+            FaissSearchResult(photo_id=first.id, score=0.42),
+        ],
+    )
+    monkeypatch.setattr(
+        shell,
+        "FaissPhotoSearchService",
+        lambda *_args, **_kwargs: fake_search_service,
+    )
+    window = shell.MainWindow(session_factory)
+
+    window.search_input.setText("beach sunset")
+    window.search_button.click()
+    app.processEvents()
+
+    assert fake_search_service.queries == [("beach sunset", shell.SEARCH_RESULT_LIMIT)]
+    assert [
+        label.text()
+        for label in window._all_photos_page.findChildren(QLabel, "photoFilename")
+    ] == ["second.jpg", "first.jpg"]
+    assert [
+        label.text()
+        for label in window._all_photos_page.findChildren(
+            QLabel,
+            "photoSimilarityScore",
+        )
+        if not label.isHidden()
+    ] == ["Similarity 0.91", "Similarity 0.42"]
+    assert window.clear_search_button.isEnabled()
+
+    window.clear_search_button.click()
+    app.processEvents()
+
+    assert [
+        label.text()
+        for label in window._all_photos_page.findChildren(QLabel, "photoFilename")
+    ] == ["first.jpg", "second.jpg"]
+    assert [
+        label.text()
+        for label in window._all_photos_page.findChildren(
+            QLabel,
+            "photoSimilarityScore",
+        )
+        if not label.isHidden()
+    ] == []
+    assert window.search_input.text() == ""
+    assert not window.clear_search_button.isEnabled()
 
 
 def test_blurry_photos_page_reuses_gallery_with_blur_badges(
@@ -521,3 +595,13 @@ class FakeThumbnailLoader:
         self.requested_path = Path(path)
         self.callback = callback
         return object()
+
+
+class FakeSemanticSearchService:
+    def __init__(self, results: list[FaissSearchResult]) -> None:
+        self._results = results
+        self.queries: list[tuple[str, int]] = []
+
+    def search_photos(self, query: str, limit: int) -> list[FaissSearchResult]:
+        self.queries.append((query, limit))
+        return self._results

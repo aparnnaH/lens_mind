@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -36,6 +38,14 @@ from lensmind.db.repository import (
     initialize_sqlite,
 )
 from lensmind.services.blur_analysis import BlurThresholds
+from lensmind.services.faiss_search import (
+    FaissIndexError,
+    FaissPhotoSearchService,
+)
+from lensmind.services.openclip_embeddings import (
+    DEFAULT_OPENCLIP_MODEL,
+    DEFAULT_OPENCLIP_PRETRAINED,
+)
 from lensmind.services.photo_display import PhotoDisplayInfo, PhotoDisplayService
 from lensmind.services.photo_import import PhotoImportService
 from lensmind.ui.import_worker import PhotoImportWorker
@@ -52,6 +62,13 @@ PAGE_TITLES = (
     "Evaluations",
     "Settings",
 )
+SEARCH_RESULT_LIMIT = 100
+
+
+@dataclass(frozen=True)
+class RankedPhotoResult:
+    photo: Photo
+    similarity_score: float
 
 
 class MainWindow(QMainWindow):
@@ -102,6 +119,24 @@ class MainWindow(QMainWindow):
         self._import_folder_action = QAction("Import Folder", self)
         self._import_folder_action.triggered.connect(self._choose_import_folder)
         toolbar.addAction(self._import_folder_action)
+
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("semanticSearchInput")
+        self.search_input.setPlaceholderText("Search photos")
+        self.search_input.setMinimumWidth(260)
+        self.search_input.returnPressed.connect(self._run_semantic_search)
+        toolbar.addWidget(self.search_input)
+
+        self.search_button = QPushButton("Search")
+        self.search_button.setObjectName("semanticSearchButton")
+        self.search_button.clicked.connect(self._run_semantic_search)
+        toolbar.addWidget(self.search_button)
+
+        self.clear_search_button = QPushButton("Clear Search")
+        self.clear_search_button.setObjectName("clearSearchButton")
+        self.clear_search_button.setEnabled(False)
+        self.clear_search_button.clicked.connect(self._clear_search)
+        toolbar.addWidget(self.clear_search_button)
 
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
@@ -208,6 +243,55 @@ class MainWindow(QMainWindow):
 
         self._inspector.set_photo(display_info)
 
+    def _run_semantic_search(self) -> None:
+        query = self.search_input.text()
+        try:
+            search_results = FaissPhotoSearchService(
+                self._get_session_factory(),
+                _default_faiss_index_dir(),
+                model_name=DEFAULT_OPENCLIP_MODEL,
+                model_config=DEFAULT_OPENCLIP_PRETRAINED,
+            ).search_photos(query, SEARCH_RESULT_LIMIT)
+        except ValueError as error:
+            self._show_all_photos_page()
+            self._all_photos_page.show_search_error(str(error))
+            self.clear_search_button.setEnabled(True)
+            return
+        except FaissIndexError as error:
+            self._show_all_photos_page()
+            self._all_photos_page.show_search_error(str(error))
+            self.clear_search_button.setEnabled(True)
+            return
+
+        with self._get_session_factory()() as session:
+            photos_by_id = {
+                photo.id: photo
+                for photo in PhotoRepository(session).list_photos()
+            }
+
+        ranked_photos = [
+            RankedPhotoResult(
+                photo=photos_by_id[result.photo_id],
+                similarity_score=result.score,
+            )
+            for result in search_results
+            if result.photo_id in photos_by_id
+        ]
+        self._show_all_photos_page()
+        self._all_photos_page.show_search_results(query, ranked_photos)
+        self.clear_search_button.setEnabled(True)
+
+    def _clear_search(self) -> None:
+        self.search_input.clear()
+        self._all_photos_page.load_photos()
+        self._show_all_photos_page()
+        self.clear_search_button.setEnabled(False)
+
+    def _show_all_photos_page(self) -> None:
+        all_photos_index = PAGE_TITLES.index("All Photos")
+        if self._sidebar.currentRow() != all_photos_index:
+            self._sidebar.setCurrentRow(all_photos_index)
+
     def _get_session_factory(self) -> sessionmaker[Session]:
         if self._session_factory is None:
             self._session_factory = initialize_sqlite(_default_database_path())
@@ -232,6 +316,7 @@ class AllPhotosPage(QWidget):
             lambda repository: repository.list_photos()
         )
         self._thumbnail_loader = ThumbnailLoader()
+        self._empty_text = empty_text
 
         title_label = QLabel(title)
         title_label.setObjectName("pageTitle")
@@ -258,6 +343,7 @@ class AllPhotosPage(QWidget):
 
     def load_photos(self) -> None:
         self._clear_grid()
+        self._empty_label.setText(self._empty_text)
         session_factory = self._session_factory_provider()
         with session_factory() as session:
             photos = self._photos_loader(PhotoRepository(session))
@@ -271,17 +357,49 @@ class AllPhotosPage(QWidget):
 
         self._grid.setRowStretch((len(photos) // 4) + 1, 1)
 
+    def show_search_results(
+        self,
+        query: str,
+        ranked_photos: list[RankedPhotoResult],
+    ) -> None:
+        self._clear_grid()
+        self._empty_label.setText(f'No results for "{query.strip()}"')
+        self._empty_label.setVisible(not ranked_photos)
+        for index, result in enumerate(ranked_photos):
+            row, column = divmod(index, 4)
+            item = PhotoGridItem(
+                result.photo,
+                self._thumbnail_loader,
+                similarity_score=result.similarity_score,
+            )
+            item.selected.connect(self.photo_selected)
+            self._grid.addWidget(item, row, column)
+
+        self._grid.setRowStretch((len(ranked_photos) // 4) + 1, 1)
+
+    def show_search_error(self, message: str) -> None:
+        self._clear_grid()
+        self._empty_label.setText(message)
+        self._empty_label.setVisible(True)
+
     def _clear_grid(self) -> None:
         while item := self._grid.takeAt(0):
             widget = item.widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
 
 
 class PhotoGridItem(QFrame):
     selected = Signal(int)
 
-    def __init__(self, photo: Photo, thumbnail_loader: ThumbnailLoader) -> None:
+    def __init__(
+        self,
+        photo: Photo,
+        thumbnail_loader: ThumbnailLoader,
+        *,
+        similarity_score: float | None = None,
+    ) -> None:
         super().__init__()
         self._photo_id = photo.id
         self.setObjectName("photoGridItem")
@@ -311,12 +429,16 @@ class PhotoGridItem(QFrame):
         blur_badge_label = QLabel(_format_blur_badge(photo.blur_score))
         blur_badge_label.setObjectName("photoBlurBadge")
         blur_badge_label.setVisible(photo.blur_score is not None)
+        similarity_label = QLabel(_format_similarity_score(similarity_score))
+        similarity_label.setObjectName("photoSimilarityScore")
+        similarity_label.setVisible(similarity_score is not None)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
         layout.addWidget(self.thumbnail_label)
         layout.addWidget(self.thumbnail_state_label)
+        layout.addWidget(similarity_label)
         layout.addWidget(blur_badge_label)
         layout.addWidget(filename_label)
         layout.addWidget(capture_date_label)
@@ -885,6 +1007,10 @@ def _default_database_path() -> Path:
     return data_directory / "lensmind.sqlite3"
 
 
+def _default_faiss_index_dir() -> Path:
+    return Path.home() / ".lensmind" / "faiss"
+
+
 def _format_capture_date(capture_timestamp: datetime | None) -> str:
     if capture_timestamp is None:
         return "Unknown date"
@@ -920,6 +1046,12 @@ def _format_blur_badge(value: float | None) -> str:
     if value is None:
         return ""
     return f"Blur {value:.0f}"
+
+
+def _format_similarity_score(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"Similarity {value:.2f}"
 
 
 def _format_duplicate_status(duplicate_group: DuplicateGroupData) -> str:

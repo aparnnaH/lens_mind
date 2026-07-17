@@ -85,6 +85,17 @@ class CachedPhotoEmbeddingData:
     generated_at: datetime
 
 
+@dataclass(frozen=True)
+class StoredPhotoEmbeddingData:
+    id: int
+    photo_id: int
+    model_name: str
+    model_config: str
+    vector_dimension: int
+    embedding_data: bytes
+    generated_at: datetime
+
+
 def initialize_sqlite(database_path: Path | str) -> sessionmaker[Session]:
     engine = create_sqlite_engine(database_path)
     Base.metadata.create_all(engine)
@@ -246,6 +257,32 @@ class PhotoRepository:
             )
             is None
         )
+
+    def list_stored_photo_embeddings(
+        self,
+        *,
+        model_name: str,
+        model_config: str,
+    ) -> list[StoredPhotoEmbeddingData]:
+        embeddings = self._session.scalars(
+            select(PhotoEmbedding)
+            .where(PhotoEmbedding.model_name == model_name)
+            .where(PhotoEmbedding.model_config == model_config)
+            .where(PhotoEmbedding.embedding_data.is_not(None))
+            .order_by(PhotoEmbedding.photo_id),
+        )
+        return [
+            StoredPhotoEmbeddingData(
+                id=embedding.id,
+                photo_id=embedding.photo_id,
+                model_name=embedding.model_name,
+                model_config=embedding.model_config,
+                vector_dimension=embedding.vector_dimension,
+                embedding_data=embedding.embedding_data or b"",
+                generated_at=embedding.generated_at,
+            )
+            for embedding in embeddings
+        ]
 
     def mark_duplicate_group_reviewed(self, duplicate_group_id: int) -> None:
         duplicate_group = self._session.get(DuplicateGroup, duplicate_group_id)
