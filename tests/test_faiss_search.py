@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from array import array
 from pathlib import Path
 
@@ -173,6 +174,66 @@ def test_search_photos_handles_stale_and_empty_index(tmp_path: Path) -> None:
 
     assert service.search_photos("sunset", limit=3) == []
     assert embedding_provider.queries == ["sunset"]
+
+
+def test_detects_corrupt_mapping_and_index_mismatch(tmp_path: Path) -> None:
+    pytest.importorskip("faiss")
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    seed_embeddings(session_factory, [(1.0, 0.0, 0.0)])
+    service = FaissPhotoSearchService(
+        session_factory,
+        tmp_path / "faiss",
+        model_name=MODEL_NAME,
+        model_config=MODEL_CONFIG,
+    )
+    service.build_index()
+
+    service.mapping_path.write_text("{")
+
+    corrupt_status = service.index_status()
+
+    assert corrupt_status.stale is True
+    assert corrupt_status.reason is not None
+    assert "invalid mapping" in corrupt_status.reason
+    with pytest.raises(StaleFaissIndexError, match="invalid mapping"):
+        service.search((1.0, 0.0, 0.0), top_k=1)
+
+    service.build_index()
+    mapping = json.loads(service.mapping_path.read_text())
+    mapping["photo_ids"] = [1, 2]
+    service.mapping_path.write_text(json.dumps(mapping))
+
+    mismatch_status = service.index_status()
+
+    assert mismatch_status.stale is True
+    assert mismatch_status.reason == "index vector count does not match mapping"
+    with pytest.raises(
+        StaleFaissIndexError,
+        match="index vector count does not match mapping",
+    ):
+        service.search((1.0, 0.0, 0.0), top_k=1)
+
+
+def test_corrupt_faiss_index_is_reported_as_index_error(tmp_path: Path) -> None:
+    pytest.importorskip("faiss")
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    seed_embeddings(session_factory, [(1.0, 0.0, 0.0)])
+    service = FaissPhotoSearchService(
+        session_factory,
+        tmp_path / "faiss",
+        model_name=MODEL_NAME,
+        model_config=MODEL_CONFIG,
+    )
+    service.build_index()
+    service.index_path.write_bytes(b"not a faiss index")
+
+    status = service.index_status()
+
+    assert status.stale is True
+    assert status.reason is not None
+    assert "failed to read FAISS index" in status.reason
+    with pytest.raises(StaleFaissIndexError, match="failed to read FAISS index"):
+        service.search((1.0, 0.0, 0.0), top_k=1)
 
 
 def seed_embeddings(session_factory, vectors: list[tuple[float, ...]]) -> list[int]:

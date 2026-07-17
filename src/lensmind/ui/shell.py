@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -95,6 +95,52 @@ class TripPageItem:
     cover_photo_id: int | None = None
 
 
+class SemanticSearchWorker(QObject):
+    results_ready = Signal(str, object)
+    search_failed = Signal(str, str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        query: str,
+    ) -> None:
+        super().__init__()
+        self._session_factory = session_factory
+        self._query = query
+
+    def run(self) -> None:
+        try:
+            search_results = FaissPhotoSearchService(
+                self._session_factory,
+                _default_faiss_index_dir(),
+                model_name=DEFAULT_OPENCLIP_MODEL,
+                model_config=DEFAULT_OPENCLIP_PRETRAINED,
+            ).search_photos(self._query, SEARCH_RESULT_LIMIT)
+
+            with self._session_factory() as session:
+                photos_by_id = {
+                    photo.id: photo
+                    for photo in PhotoRepository(session).list_photos()
+                }
+
+            ranked_photos = [
+                RankedPhotoResult(
+                    photo=photos_by_id[result.photo_id],
+                    similarity_score=result.score,
+                )
+                for result in search_results
+                if result.photo_id in photos_by_id
+            ]
+            self.results_ready.emit(self._query, ranked_photos)
+        except (ValueError, FaissIndexError) as error:
+            self.search_failed.emit(self._query, str(error))
+        except Exception as error:
+            self.search_failed.emit(self._query, f"search failed: {error}")
+        finally:
+            self.finished.emit()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, session_factory: sessionmaker[Session] | None = None) -> None:
         super().__init__()
@@ -106,6 +152,8 @@ class MainWindow(QMainWindow):
         self._session_factory = session_factory
         self._import_thread: QThread | None = None
         self._import_worker: PhotoImportWorker | None = None
+        self._search_thread: QThread | None = None
+        self._search_worker: SemanticSearchWorker | None = None
         self._selected_photo_ids: set[int] = set()
         self._all_photos_page = AllPhotosPage(
             self._get_session_factory,
@@ -347,44 +395,51 @@ class MainWindow(QMainWindow):
         )
 
     def _run_semantic_search(self) -> None:
+        if self._search_thread is not None:
+            return
+
         query = self.search_input.text()
-        try:
-            search_results = FaissPhotoSearchService(
-                self._get_session_factory(),
-                _default_faiss_index_dir(),
-                model_name=DEFAULT_OPENCLIP_MODEL,
-                model_config=DEFAULT_OPENCLIP_PRETRAINED,
-            ).search_photos(query, SEARCH_RESULT_LIMIT)
-        except ValueError as error:
-            self._show_all_photos_page()
-            self._all_photos_page.show_search_error(str(error))
-            self.clear_search_button.setEnabled(True)
-            return
-        except FaissIndexError as error:
-            self._show_all_photos_page()
-            self._all_photos_page.show_search_error(str(error))
-            self.clear_search_button.setEnabled(True)
-            return
+        worker = SemanticSearchWorker(self._get_session_factory(), query)
+        thread = QThread(self)
+        worker.moveToThread(thread)
 
-        with self._get_session_factory()() as session:
-            photos_by_id = {
-                photo.id: photo
-                for photo in PhotoRepository(session).list_photos()
-            }
+        self._search_worker = worker
+        self._search_thread = thread
+        self.search_button.setEnabled(False)
+        self.clear_search_button.setEnabled(False)
 
-        ranked_photos = [
-            RankedPhotoResult(
-                photo=photos_by_id[result.photo_id],
-                similarity_score=result.score,
-            )
-            for result in search_results
-            if result.photo_id in photos_by_id
-        ]
+        thread.started.connect(worker.run)
+        worker.results_ready.connect(self._show_semantic_search_results)
+        worker.search_failed.connect(self._show_semantic_search_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_search_worker)
+        thread.start()
+
+    def _show_semantic_search_results(
+        self,
+        query: str,
+        ranked_photos: list[RankedPhotoResult],
+    ) -> None:
         self._show_all_photos_page()
         self._all_photos_page.show_search_results(query, ranked_photos)
         self.clear_search_button.setEnabled(True)
 
+    def _show_semantic_search_error(self, _query: str, message: str) -> None:
+        self._show_all_photos_page()
+        self._all_photos_page.show_search_error(message)
+        self.clear_search_button.setEnabled(bool(self.search_input.text().strip()))
+
+    def _clear_search_worker(self) -> None:
+        self._search_worker = None
+        self._search_thread = None
+        self.search_button.setEnabled(True)
+        self.clear_search_button.setEnabled(bool(self.search_input.text().strip()))
+
     def _clear_search(self) -> None:
+        if self._search_thread is not None:
+            return
         self.search_input.clear()
         self._all_photos_page.load_photos()
         self._show_all_photos_page()

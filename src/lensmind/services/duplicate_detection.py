@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from itertools import combinations
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -57,16 +57,10 @@ class DuplicateDetectionService:
             exact_groups_created += 1
 
         self._ensure_perceptual_hashes()
-        for first_photo, second_photo, distance in self._likely_duplicate_pairs():
-            self._create_group(
-                classification="likely",
-                group_key=f"likely:{first_photo.id}:{second_photo.id}",
-                photos=[first_photo, second_photo],
-                distance_threshold=self._distance_threshold,
-                max_distance=distance,
-            )
-            likely_groups_created += 1
-            duplicate_photo_count += 2
+        likely_groups_created, likely_duplicate_photos = (
+            self._create_likely_duplicate_groups()
+        )
+        duplicate_photo_count += likely_duplicate_photos
 
         self._session.commit()
         return DuplicateDetectionSummary(
@@ -105,30 +99,37 @@ class DuplicateDetectionService:
                 photo.perceptual_hash = result.value
         self._session.flush()
 
-    def _likely_duplicate_pairs(self) -> list[tuple[Photo, Photo, int]]:
-        photos = list(
-            self._session.scalars(
-                select(Photo)
-                .where(Photo.perceptual_hash.is_not(None))
-                .order_by(Photo.id),
-            ),
+    def _create_likely_duplicate_groups(self) -> tuple[int, int]:
+        groups_created = 0
+        duplicate_photo_count = 0
+        tree = _PerceptualHashTree()
+        photos = self._session.scalars(
+            select(Photo)
+            .where(Photo.perceptual_hash.is_not(None))
+            .order_by(Photo.id),
         )
-        likely_pairs: list[tuple[Photo, Photo, int]] = []
-        for first_photo, second_photo in combinations(photos, 2):
-            if _same_exact_hash(first_photo, second_photo):
+
+        for photo in photos:
+            if photo.perceptual_hash is None:
                 continue
-            if (
-                first_photo.perceptual_hash is None
-                or second_photo.perceptual_hash is None
+            for matched_photo, distance in tree.find_within_distance(
+                photo.perceptual_hash,
+                self._distance_threshold,
             ):
-                continue
-            distance = hamming_distance(
-                first_photo.perceptual_hash,
-                second_photo.perceptual_hash,
-            )
-            if distance <= self._distance_threshold:
-                likely_pairs.append((first_photo, second_photo, distance))
-        return likely_pairs
+                if _same_exact_hash(matched_photo, photo):
+                    continue
+                self._create_group(
+                    classification="likely",
+                    group_key=f"likely:{matched_photo.id}:{photo.id}",
+                    photos=[matched_photo, photo],
+                    distance_threshold=self._distance_threshold,
+                    max_distance=distance,
+                )
+                groups_created += 1
+                duplicate_photo_count += 2
+            tree.add(photo)
+
+        return groups_created, duplicate_photo_count
 
     def _create_group(
         self,
@@ -156,6 +157,66 @@ class DuplicateDetectionService:
                     photo_id=photo.id,
                 ),
             )
+
+
+class _PerceptualHashTree:
+    def __init__(self) -> None:
+        self._root: _PerceptualHashNode | None = None
+
+    def add(self, photo: Photo) -> None:
+        if photo.perceptual_hash is None:
+            return
+        if self._root is None:
+            self._root = _PerceptualHashNode(photo)
+            return
+        self._root.add(photo)
+
+    def find_within_distance(
+        self,
+        perceptual_hash: str,
+        threshold: int,
+    ) -> Iterator[tuple[Photo, int]]:
+        if self._root is None:
+            return
+        yield from self._root.find_within_distance(perceptual_hash, threshold)
+
+
+class _PerceptualHashNode:
+    def __init__(self, photo: Photo) -> None:
+        if photo.perceptual_hash is None:
+            msg = "perceptual hash is required"
+            raise ValueError(msg)
+        self.photo = photo
+        self.perceptual_hash = photo.perceptual_hash
+        self.children: dict[int, _PerceptualHashNode] = {}
+
+    def add(self, photo: Photo) -> None:
+        if photo.perceptual_hash is None:
+            return
+        distance = hamming_distance(self.perceptual_hash, photo.perceptual_hash)
+        child = self.children.get(distance)
+        if child is None:
+            self.children[distance] = _PerceptualHashNode(photo)
+            return
+        child.add(photo)
+
+    def find_within_distance(
+        self,
+        perceptual_hash: str,
+        threshold: int,
+    ) -> Iterator[tuple[Photo, int]]:
+        distance = hamming_distance(self.perceptual_hash, perceptual_hash)
+        if distance <= threshold:
+            yield self.photo, distance
+
+        min_distance = distance - threshold
+        max_distance = distance + threshold
+        for child_distance, child in self.children.items():
+            if min_distance <= child_distance <= max_distance:
+                yield from child.find_within_distance(
+                    perceptual_hash,
+                    threshold,
+                )
 
 
 def _same_exact_hash(first_photo: Photo, second_photo: Photo) -> bool:

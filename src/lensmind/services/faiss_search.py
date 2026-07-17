@@ -3,15 +3,19 @@ from __future__ import annotations
 import json
 from array import array
 from dataclasses import dataclass
+from json import JSONDecodeError
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
+import numpy.typing as npt
 from sqlalchemy.orm import Session, sessionmaker
 
 from lensmind.db.repository import PhotoRepository, StoredPhotoEmbeddingData
 from lensmind.services.embeddings import EmbeddingProvider
 from lensmind.services.openclip_embeddings import OpenCLIPEmbeddingProvider
+
+FloatArray = npt.NDArray[np.float32]
 
 
 @dataclass(frozen=True)
@@ -65,19 +69,25 @@ class FaissPhotoSearchService:
 
     def build_index(self) -> FaissIndexStatus:
         embeddings = self._list_embeddings()
-        vectors = _vectors_from_embeddings(embeddings)
+        dimension = _validate_embedding_dimensions(embeddings)
         faiss = _get_faiss()
-        index = faiss.IndexFlatIP(vectors.shape[1])
-        index.add(vectors)
+        index = faiss.IndexFlatIP(dimension)
+        for embedding in embeddings:
+            index.add(
+                _normalized_embedding(
+                    embedding.embedding_data,
+                    embedding.vector_dimension,
+                ),
+            )
 
         self._index_dir.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(index, str(self.index_path))
+        _write_index(faiss, index, self.index_path)
         self.mapping_path.write_text(
             json.dumps(
                 {
                     "model_name": self._model_name,
                     "model_config": self._model_config,
-                    "dimension": int(vectors.shape[1]),
+                    "dimension": dimension,
                     "photo_ids": [embedding.photo_id for embedding in embeddings],
                     "signature": _signature(embeddings),
                 },
@@ -110,13 +120,20 @@ class FaissPhotoSearchService:
                 reason="missing mapping",
             )
 
-        mapping = self._load_mapping()
+        try:
+            mapping = self._load_mapping()
+        except FaissIndexError as error:
+            return self._stale_status(str(error))
         if mapping.get("model_name") != self._model_name:
             return self._stale_status("model name mismatch")
         if mapping.get("model_config") != self._model_config:
             return self._stale_status("model config mismatch")
         if mapping.get("signature") != _signature(self._list_embeddings()):
             return self._stale_status("embedding data changed")
+        try:
+            self._validate_index_mapping(mapping)
+        except FaissIndexError as error:
+            return self._stale_status(str(error))
         return FaissIndexStatus(
             index_exists=True,
             mapping_exists=True,
@@ -125,7 +142,7 @@ class FaissPhotoSearchService:
 
     def search(
         self,
-        query_vector: tuple[float, ...] | list[float] | np.ndarray,
+        query_vector: tuple[float, ...] | list[float] | npt.NDArray[Any],
         *,
         top_k: int = 10,
     ) -> list[FaissSearchResult]:
@@ -146,7 +163,8 @@ class FaissPhotoSearchService:
         dimension = int(mapping["dimension"])
         query = _normalized_query(query_vector, dimension)
         faiss = _get_faiss()
-        index = faiss.read_index(str(self.index_path))
+        index = _read_index(faiss, self.index_path)
+        _validate_index_counts(index, dimension, len(photo_ids))
         scores, indices = index.search(query, min(top_k, len(photo_ids)))
         return [
             FaissSearchResult(
@@ -193,7 +211,22 @@ class FaissPhotoSearchService:
             )
 
     def _load_mapping(self) -> dict[str, Any]:
-        return json.loads(self.mapping_path.read_text())
+        try:
+            mapping = json.loads(self.mapping_path.read_text())
+        except (OSError, JSONDecodeError) as error:
+            msg = f"invalid mapping: {error}"
+            raise FaissIndexError(msg) from error
+        if not isinstance(mapping, dict):
+            msg = "invalid mapping: expected JSON object"
+            raise FaissIndexError(msg)
+        _validate_mapping_shape(mapping)
+        return mapping
+
+    def _validate_index_mapping(self, mapping: dict[str, Any]) -> None:
+        photo_ids = [int(photo_id) for photo_id in mapping["photo_ids"]]
+        dimension = int(mapping["dimension"])
+        index = _read_index(_get_faiss(), self.index_path)
+        _validate_index_counts(index, dimension, len(photo_ids))
 
     def _stale_status(self, reason: str) -> FaissIndexStatus:
         return FaissIndexStatus(
@@ -204,39 +237,35 @@ class FaissPhotoSearchService:
         )
 
 
-def _vectors_from_embeddings(
-    embeddings: list[StoredPhotoEmbeddingData],
-) -> np.ndarray:
+def _validate_embedding_dimensions(embeddings: list[StoredPhotoEmbeddingData]) -> int:
     if not embeddings:
         msg = "no stored embeddings available"
         raise FaissIndexError(msg)
 
     dimension = embeddings[0].vector_dimension
-    vectors = np.vstack(
-        [
-            _vector_from_bytes(embedding.embedding_data, embedding.vector_dimension)
-            for embedding in embeddings
-        ],
-    )
     if any(embedding.vector_dimension != dimension for embedding in embeddings):
         msg = "embedding dimensions do not match"
         raise FaissIndexError(msg)
-    return _normalize(vectors)
+    return dimension
 
 
-def _vector_from_bytes(data: bytes, dimension: int) -> np.ndarray:
+def _normalized_embedding(data: bytes, dimension: int) -> FloatArray:
+    return _normalize(_vector_from_bytes(data, dimension).reshape(1, -1))
+
+
+def _vector_from_bytes(data: bytes, dimension: int) -> FloatArray:
     values = array("f")
     values.frombytes(data)
     if len(values) != dimension:
         msg = "embedding byte length does not match vector dimension"
         raise FaissIndexError(msg)
-    return np.asarray(values, dtype=np.float32)
+    return cast(FloatArray, np.asarray(values, dtype=np.float32))
 
 
 def _normalized_query(
-    query_vector: tuple[float, ...] | list[float] | np.ndarray,
+    query_vector: tuple[float, ...] | list[float] | npt.NDArray[Any],
     dimension: int,
-) -> np.ndarray:
+) -> FloatArray:
     query = np.asarray(query_vector, dtype=np.float32).reshape(1, -1)
     if query.shape[1] != dimension:
         msg = "query vector dimension does not match index"
@@ -244,12 +273,50 @@ def _normalized_query(
     return _normalize(query)
 
 
-def _normalize(vectors: np.ndarray) -> np.ndarray:
+def _normalize(vectors: FloatArray) -> FloatArray:
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     if np.any(norms == 0):
         msg = "embedding vectors must be non-zero"
         raise FaissIndexError(msg)
-    return vectors / norms
+    return cast(FloatArray, vectors / norms)
+
+
+def _validate_mapping_shape(mapping: dict[str, Any]) -> None:
+    dimension = mapping.get("dimension")
+    photo_ids = mapping.get("photo_ids")
+    if type(dimension) is not int or dimension < 1:
+        msg = "invalid mapping: dimension must be a positive integer"
+        raise FaissIndexError(msg)
+    if not isinstance(photo_ids, list) or not all(
+        type(photo_id) is int and photo_id > 0 for photo_id in photo_ids
+    ):
+        msg = "invalid mapping: photo_ids must be positive integers"
+        raise FaissIndexError(msg)
+
+
+def _validate_index_counts(index: Any, dimension: int, photo_count: int) -> None:
+    if int(index.d) != dimension:
+        msg = "index dimension does not match mapping"
+        raise FaissIndexError(msg)
+    if int(index.ntotal) != photo_count:
+        msg = "index vector count does not match mapping"
+        raise FaissIndexError(msg)
+
+
+def _read_index(faiss: Any, path: Path) -> Any:
+    try:
+        return faiss.read_index(str(path))
+    except Exception as error:
+        msg = f"failed to read FAISS index: {error}"
+        raise FaissIndexError(msg) from error
+
+
+def _write_index(faiss: Any, index: Any, path: Path) -> None:
+    try:
+        faiss.write_index(index, str(path))
+    except Exception as error:
+        msg = f"failed to write FAISS index: {error}"
+        raise FaissIndexError(msg) from error
 
 
 def _signature(

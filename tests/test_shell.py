@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,15 @@ def app() -> QApplication:
         return existing_app
 
     return QApplication([])
+
+
+def wait_until(app: QApplication, condition) -> None:
+    deadline = time.monotonic() + 3
+    while not condition() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    assert condition()
 
 
 def test_run_application_starts_main_window(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,7 +275,9 @@ def test_top_search_bar_displays_semantic_results_and_clear_search(
 
     window.search_input.setText("beach sunset")
     window.search_button.click()
-    app.processEvents()
+
+    assert not window.search_button.isEnabled()
+    wait_until(app, lambda: window._search_thread is None)
 
     assert fake_search_service.queries == [("beach sunset", shell.SEARCH_RESULT_LIMIT)]
     assert [
