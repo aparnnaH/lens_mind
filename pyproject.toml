@@ -8,10 +8,14 @@ version = "0.1.0"
 description = "Minimal desktop application foundation for LensMind."
 requires-python = ">=3.11"
 dependencies = [
+    "numpy>=1.26,<2",
+    "open_clip_torch>=3.3",
     "opencv-python-headless>=4.10",
     "Pillow>=10.4",
     "PySide6>=6.7",
     "SQLAlchemy>=2.0",
+    "torch>=2.2",
+    "torchvision>=0.17",
 ]
 
 [project.optional-dependencies]
@@ -43,3 +47,9 @@ python_version = "3.11"
 strict = true
 packages = ["lensmind"]
 mypy_path = "src"
+
+[tool.lensmind.embeddings]
+model_name = "ViT-B-32"
+pretrained = "laion2b_s34b_b79k"
+batch_size = 8
+device_policy = "mps_if_available_else_cpu"
