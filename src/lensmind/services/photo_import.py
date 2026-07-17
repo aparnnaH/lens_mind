@@ -95,7 +95,7 @@ class PhotoImportService:
                     total_count,
                     len(errors),
                 )
-                photo_data = self._build_photo_data(record, errors)
+                photo_data = self._build_photo_data(record, errors, source_folder.id)
                 completed_count += 1
                 if photo_data is None:
                     _emit_progress(
@@ -157,6 +157,7 @@ class PhotoImportService:
         self,
         record: PhotoFileRecord,
         errors: list[PhotoImportError],
+        source_folder_id: int,
     ) -> PhotoData | None:
         try:
             sha256 = calculate_sha256(record.path)
@@ -172,8 +173,10 @@ class PhotoImportService:
             original_path=str(record.path),
             filename=record.filename,
             file_size=record.file_size,
+            source_folder_id=source_folder_id,
             sha256=sha256,
             capture_timestamp=metadata.capture_timestamp,
+            timestamp_source=metadata.timestamp_source,
             width=metadata.width,
             height=metadata.height,
             camera_make=metadata.camera_make,

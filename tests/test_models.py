@@ -23,10 +23,12 @@ def test_photo_model_has_requested_columns() -> None:
     expected_columns = {
         "id",
         "original_path",
+        "source_folder_id",
         "filename",
         "file_size",
         "sha256",
         "capture_timestamp",
+        "timestamp_source",
         "width",
         "height",
         "camera_make",

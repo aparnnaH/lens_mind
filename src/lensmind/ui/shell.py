@@ -5,8 +5,8 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QThread
-from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtCore import QSize, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from lensmind.db.models import Photo
 from lensmind.db.repository import PhotoRepository, initialize_sqlite
+from lensmind.services.photo_display import PhotoDisplayInfo, PhotoDisplayService
 from lensmind.services.photo_import import PhotoImportService
 from lensmind.ui.import_worker import PhotoImportWorker
 from lensmind.ui.thumbnail_loader import ThumbnailLoader, ThumbnailLoadResult
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
         self._import_thread: QThread | None = None
         self._import_worker: PhotoImportWorker | None = None
         self._all_photos_page = AllPhotosPage(self._get_session_factory)
+        self._all_photos_page.photo_selected.connect(self._show_photo_details)
         self._indexing_page = IndexingPage()
         self._pages = QStackedWidget()
         self._sidebar = self._build_sidebar()
@@ -108,20 +110,7 @@ class MainWindow(QMainWindow):
                 self._pages.addWidget(PlaceholderPage(title))
 
     def _build_inspector(self) -> QFrame:
-        inspector = QFrame()
-        inspector.setObjectName("rightInspector")
-        inspector.setMinimumWidth(260)
-        inspector.setMaximumWidth(340)
-        inspector.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Expanding,
-        )
-
-        layout = QVBoxLayout(inspector)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.addWidget(QLabel("Inspector"))
-        layout.addStretch(1)
-        return inspector
+        return PhotoDetailsInspector()
 
     def _build_layout(self) -> None:
         content = QWidget()
@@ -184,6 +173,12 @@ class MainWindow(QMainWindow):
         self._import_worker = None
         self._import_thread = None
 
+    def _show_photo_details(self, photo_id: int) -> None:
+        with self._get_session_factory()() as session:
+            display_info = PhotoDisplayService(session).get_photo_display_info(photo_id)
+
+        self._inspector.set_photo(display_info)
+
     def _get_session_factory(self) -> sessionmaker[Session]:
         if self._session_factory is None:
             self._session_factory = initialize_sqlite(_default_database_path())
@@ -192,6 +187,8 @@ class MainWindow(QMainWindow):
 
 
 class AllPhotosPage(QWidget):
+    photo_selected = Signal(int)
+
     def __init__(
         self,
         session_factory_provider: Callable[[], sessionmaker[Session]],
@@ -232,11 +229,9 @@ class AllPhotosPage(QWidget):
         self._empty_label.setVisible(not photos)
         for index, photo in enumerate(photos):
             row, column = divmod(index, 4)
-            self._grid.addWidget(
-                PhotoGridItem(photo, self._thumbnail_loader),
-                row,
-                column,
-            )
+            item = PhotoGridItem(photo, self._thumbnail_loader)
+            item.selected.connect(self.photo_selected)
+            self._grid.addWidget(item, row, column)
 
         self._grid.setRowStretch((len(photos) // 4) + 1, 1)
 
@@ -248,11 +243,15 @@ class AllPhotosPage(QWidget):
 
 
 class PhotoGridItem(QFrame):
+    selected = Signal(int)
+
     def __init__(self, photo: Photo, thumbnail_loader: ThumbnailLoader) -> None:
         super().__init__()
+        self._photo_id = photo.id
         self.setObjectName("photoGridItem")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setFixedWidth(180)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._thumbnail_path = (
             Path(photo.thumbnail_path) if photo.thumbnail_path else None
         )
@@ -281,6 +280,11 @@ class PhotoGridItem(QFrame):
         layout.addWidget(capture_date_label)
 
         self._load_thumbnail(photo, thumbnail_loader)
+
+    def mousePressEvent(self, event: object) -> None:
+        if self._photo_id is not None:
+            self.selected.emit(self._photo_id)
+        super().mousePressEvent(event)
 
     def _load_thumbnail(
         self,
@@ -326,6 +330,129 @@ class PhotoGridItem(QFrame):
         if clear_image:
             self.thumbnail_label.clear()
         self.thumbnail_state_label.setText(text)
+
+
+class PhotoDetailsInspector(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("rightInspector")
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(340)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._original_path: Path | None = None
+
+        title_label = QLabel("Inspector")
+        title_label.setObjectName("inspectorTitle")
+
+        self._fields = {
+            "filename": _detail_value_label("inspectorFilename"),
+            "original_path": _detail_value_label("inspectorOriginalPath"),
+            "file_size": _detail_value_label("inspectorFileSize"),
+            "capture_date": _detail_value_label("inspectorCaptureDate"),
+            "timestamp_source": _detail_value_label("inspectorTimestampSource"),
+            "dimensions": _detail_value_label("inspectorDimensions"),
+            "camera_details": _detail_value_label("inspectorCameraDetails"),
+            "gps_coordinates": _detail_value_label("inspectorGpsCoordinates"),
+            "blur_score": _detail_value_label("inspectorBlurScore"),
+            "source_folder": _detail_value_label("inspectorSourceFolder"),
+            "missing_file": _detail_value_label("inspectorMissingFile"),
+            "preview_path": _detail_value_label("inspectorPreviewPath"),
+        }
+
+        self.open_in_finder_button = QPushButton("Open in Finder")
+        self.open_in_finder_button.setObjectName("openInFinderButton")
+        self.open_original_button = QPushButton("Open Original")
+        self.open_original_button.setObjectName("openOriginalButton")
+        self.copy_path_button = QPushButton("Copy Path")
+        self.copy_path_button.setObjectName("copyPathButton")
+
+        self.open_in_finder_button.clicked.connect(self._open_in_finder)
+        self.open_original_button.clicked.connect(self._open_original)
+        self.copy_path_button.clicked.connect(self._copy_path)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        layout.addWidget(title_label)
+        for label_text, key in (
+            ("Filename", "filename"),
+            ("Preview", "preview_path"),
+            ("Original", "original_path"),
+            ("File size", "file_size"),
+            ("Capture date", "capture_date"),
+            ("Timestamp", "timestamp_source"),
+            ("Dimensions", "dimensions"),
+            ("Camera", "camera_details"),
+            ("GPS", "gps_coordinates"),
+            ("Blur score", "blur_score"),
+            ("Source folder", "source_folder"),
+            ("Missing file", "missing_file"),
+        ):
+            layout.addWidget(QLabel(label_text))
+            layout.addWidget(self._fields[key])
+
+        layout.addWidget(self.open_in_finder_button)
+        layout.addWidget(self.open_original_button)
+        layout.addWidget(self.copy_path_button)
+        layout.addStretch(1)
+        self.set_photo(None)
+
+    def set_photo(self, display_info: PhotoDisplayInfo | None) -> None:
+        if display_info is None:
+            self._original_path = None
+            for label in self._fields.values():
+                label.setText("Select a photo")
+            self._set_actions_enabled(False)
+            return
+
+        self._original_path = display_info.original_path
+        self._fields["filename"].setText(display_info.filename)
+        self._fields["preview_path"].setText(_format_optional_path(display_info.preview_path))
+        self._fields["original_path"].setText(str(display_info.original_path))
+        self._fields["file_size"].setText(_format_file_size(display_info.file_size))
+        self._fields["capture_date"].setText(_format_capture_date(display_info.capture_date))
+        self._fields["timestamp_source"].setText(
+            _format_optional_text(display_info.timestamp_source),
+        )
+        self._fields["dimensions"].setText(_format_dimensions(display_info.dimensions))
+        self._fields["camera_details"].setText(
+            _format_optional_text(display_info.camera_details),
+        )
+        self._fields["gps_coordinates"].setText(
+            _format_gps_coordinates(display_info.gps_coordinates),
+        )
+        self._fields["blur_score"].setText(_format_optional_number(display_info.blur_score))
+        self._fields["source_folder"].setText(
+            _format_optional_path(display_info.source_folder),
+        )
+        self._fields["missing_file"].setText(
+            "Yes" if display_info.missing_file else "No",
+        )
+        self._set_actions_enabled(not display_info.missing_file)
+        self.copy_path_button.setEnabled(True)
+
+    def _open_in_finder(self) -> None:
+        if self._original_path is None:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._original_path.parent)))
+
+    def _open_original(self) -> None:
+        if self._original_path is None:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._original_path)))
+
+    def _copy_path(self) -> None:
+        if self._original_path is None:
+            return
+        QApplication.clipboard().setText(str(self._original_path))
+
+    def _set_actions_enabled(self, enabled: bool) -> None:
+        self.open_in_finder_button.setEnabled(enabled)
+        self.open_original_button.setEnabled(enabled)
+        self.copy_path_button.setEnabled(enabled)
 
 
 class PlaceholderPage(QWidget):
@@ -443,6 +570,53 @@ def _format_capture_date(capture_timestamp: datetime | None) -> str:
     if capture_timestamp is None:
         return "Unknown date"
     return capture_timestamp.strftime("%Y-%m-%d")
+
+
+def _detail_value_label(object_name: str) -> QLabel:
+    label = QLabel("-")
+    label.setObjectName(object_name)
+    label.setWordWrap(True)
+    return label
+
+
+def _format_optional_path(path: Path | None) -> str:
+    if path is None:
+        return "-"
+    return str(path)
+
+
+def _format_optional_text(value: str | None) -> str:
+    if not value:
+        return "-"
+    return value
+
+
+def _format_optional_number(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.2f}"
+
+
+def _format_dimensions(dimensions: tuple[int, int] | None) -> str:
+    if dimensions is None:
+        return "-"
+    width, height = dimensions
+    return f"{width} x {height}"
+
+
+def _format_gps_coordinates(coordinates: tuple[float, float] | None) -> str:
+    if coordinates is None:
+        return "-"
+    latitude, longitude = coordinates
+    return f"{latitude:.6f}, {longitude:.6f}"
+
+
+def _format_file_size(file_size: int) -> str:
+    if file_size < 1024:
+        return f"{file_size} B"
+    if file_size < 1024 * 1024:
+        return f"{file_size / 1024:.1f} KB"
+    return f"{file_size / (1024 * 1024):.1f} MB"
 
 
 def run_application(argv: Sequence[str] | None = None) -> int:

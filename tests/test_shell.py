@@ -166,6 +166,118 @@ def test_all_photos_page_loads_repository_records(
     assert page.findChild(QLabel, "emptyAllPhotosLabel").isHidden()
 
 
+def test_gallery_selection_updates_photo_details_inspector(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        source_folder = repository.add_source_folder(str(tmp_path / "photos"))
+        photo = repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "photos" / "selected.jpg"),
+                source_folder_id=source_folder.id,
+                filename="selected.jpg",
+                file_size=2048,
+                capture_timestamp=datetime(2026, 2, 3, 4, 5, 6),
+                timestamp_source="exif",
+                width=4000,
+                height=3000,
+                camera_make="Canon",
+                camera_model="EOS",
+                latitude=43.65,
+                longitude=-79.38,
+                blur_score=0.42,
+            ),
+        )
+
+    window = shell.MainWindow(session_factory)
+
+    window._show_photo_details(photo.id)
+    app.processEvents()
+
+    assert window._inspector.findChild(QLabel, "inspectorFilename").text() == (
+        "selected.jpg"
+    )
+    assert window._inspector.findChild(QLabel, "inspectorCaptureDate").text() == (
+        "2026-02-03"
+    )
+    assert window._inspector.findChild(QLabel, "inspectorTimestampSource").text() == (
+        "exif"
+    )
+    assert window._inspector.findChild(QLabel, "inspectorDimensions").text() == (
+        "4000 x 3000"
+    )
+    assert window._inspector.findChild(QLabel, "inspectorCameraDetails").text() == (
+        "Canon EOS"
+    )
+    assert window._inspector.findChild(QLabel, "inspectorGpsCoordinates").text() == (
+        "43.650000, -79.380000"
+    )
+    assert window._inspector.findChild(QLabel, "inspectorBlurScore").text() == "0.42"
+    assert window._inspector.findChild(QLabel, "inspectorMissingFile").text() == "No"
+
+
+def test_photo_details_inspector_shows_placeholders_for_missing_metadata(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    inspector = shell.PhotoDetailsInspector()
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        photo = PhotoRepository(session).add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "missing.jpg"),
+                filename="missing.jpg",
+                file_size=100,
+                missing_file=True,
+            ),
+        )
+        display_info = shell.PhotoDisplayService(session).get_photo_display_info(
+            photo.id,
+        )
+
+    inspector.set_photo(display_info)
+
+    assert inspector.findChild(QLabel, "inspectorPreviewPath").text() == "-"
+    assert inspector.findChild(QLabel, "inspectorTimestampSource").text() == "-"
+    assert inspector.findChild(QLabel, "inspectorDimensions").text() == "-"
+    assert inspector.findChild(QLabel, "inspectorCameraDetails").text() == "-"
+    assert inspector.findChild(QLabel, "inspectorGpsCoordinates").text() == "-"
+    assert inspector.findChild(QLabel, "inspectorBlurScore").text() == "-"
+    assert inspector.findChild(QLabel, "inspectorSourceFolder").text() == "-"
+    assert inspector.findChild(QLabel, "inspectorMissingFile").text() == "Yes"
+    assert not inspector.open_in_finder_button.isEnabled()
+    assert not inspector.open_original_button.isEnabled()
+    assert inspector.copy_path_button.isEnabled()
+
+
+def test_photo_details_inspector_copies_original_path(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    inspector = shell.PhotoDetailsInspector()
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    original_path = tmp_path / "photo.jpg"
+    with session_factory() as session:
+        photo = PhotoRepository(session).add_or_update_photo(
+            PhotoData(
+                original_path=str(original_path),
+                filename="photo.jpg",
+                file_size=100,
+            ),
+        )
+        display_info = shell.PhotoDisplayService(session).get_photo_display_info(
+            photo.id,
+        )
+
+    inspector.set_photo(display_info)
+    inspector.copy_path_button.click()
+
+    assert QApplication.clipboard().text() == str(original_path)
+
+
 def test_photo_grid_item_shows_placeholder_while_thumbnail_loads(
     app: QApplication,
     tmp_path: Path,

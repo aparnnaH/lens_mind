@@ -33,10 +33,14 @@ class Photo(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     original_path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    source_folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_folders.id"),
+    )
     filename: Mapped[str] = mapped_column(String, nullable=False)
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     capture_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    timestamp_source: Mapped[str | None] = mapped_column(String)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     camera_make: Mapped[str | None] = mapped_column(String)
@@ -57,6 +61,7 @@ class Photo(Base):
         back_populates="photo",
         cascade="all, delete-orphan",
     )
+    source_folder: Mapped[SourceFolder | None] = relationship()
 
 
 class Album(Base):

@@ -15,8 +15,10 @@ class PhotoData:
     original_path: str
     filename: str
     file_size: int
+    source_folder_id: int | None = None
     sha256: str | None = None
     capture_timestamp: datetime | None = None
+    timestamp_source: str | None = None
     width: int | None = None
     height: int | None = None
     camera_make: str | None = None
@@ -74,9 +76,11 @@ class PhotoRepository:
             self._session.add(photo)
 
         photo.filename = data.filename
+        photo.source_folder_id = data.source_folder_id
         photo.file_size = data.file_size
         photo.sha256 = data.sha256
         photo.capture_timestamp = data.capture_timestamp
+        photo.timestamp_source = data.timestamp_source
         photo.width = data.width
         photo.height = data.height
         photo.camera_make = data.camera_make
