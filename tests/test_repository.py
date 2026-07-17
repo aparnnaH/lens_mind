@@ -81,6 +81,40 @@ def test_mark_photo_missing(tmp_path: Path) -> None:
     assert missing_photo.missing_file is True
 
 
+def test_list_blurry_photos_filters_by_threshold(tmp_path: Path) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/blurry.jpg",
+                filename="blurry.jpg",
+                file_size=100,
+                blur_score=25.0,
+            ),
+        )
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/sharp.jpg",
+                filename="sharp.jpg",
+                file_size=100,
+                blur_score=250.0,
+            ),
+        )
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/unknown.jpg",
+                filename="unknown.jpg",
+                file_size=100,
+            ),
+        )
+
+        photos = repository.list_blurry_photos(100.0)
+
+    assert [photo.filename for photo in photos] == ["blurry.jpg"]
+
+
 def test_record_indexing_run(tmp_path: Path) -> None:
     session_factory = initialize_sqlite(tmp_path / "lensmind.db")
     started_at = datetime(2026, 1, 1, tzinfo=UTC)

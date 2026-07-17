@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from lensmind.db.models import Photo
 from lensmind.db.repository import PhotoRepository, initialize_sqlite
+from lensmind.services.blur_analysis import BlurThresholds
 from lensmind.services.photo_display import PhotoDisplayInfo, PhotoDisplayService
 from lensmind.services.photo_import import PhotoImportService
 from lensmind.ui.import_worker import PhotoImportWorker
@@ -59,8 +60,21 @@ class MainWindow(QMainWindow):
         self._session_factory = session_factory
         self._import_thread: QThread | None = None
         self._import_worker: PhotoImportWorker | None = None
-        self._all_photos_page = AllPhotosPage(self._get_session_factory)
+        self._all_photos_page = AllPhotosPage(
+            self._get_session_factory,
+            title="All Photos",
+            empty_text="No photos imported yet",
+        )
         self._all_photos_page.photo_selected.connect(self._show_photo_details)
+        self._blurry_photos_page = AllPhotosPage(
+            self._get_session_factory,
+            title="Blurry Photos",
+            empty_text="No blurry photos found",
+            photos_loader=lambda repository: repository.list_blurry_photos(
+                BlurThresholds().blurry,
+            ),
+        )
+        self._blurry_photos_page.photo_selected.connect(self._show_photo_details)
         self._indexing_page = IndexingPage()
         self._pages = QStackedWidget()
         self._sidebar = self._build_sidebar()
@@ -104,6 +118,8 @@ class MainWindow(QMainWindow):
         for title in PAGE_TITLES:
             if title == "All Photos":
                 self._pages.addWidget(self._all_photos_page)
+            elif title == "Blurry Photos":
+                self._pages.addWidget(self._blurry_photos_page)
             elif title == "Indexing":
                 self._pages.addWidget(self._indexing_page)
             else:
@@ -158,6 +174,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._clear_import_worker)
         thread.finished.connect(self._all_photos_page.load_photos)
+        thread.finished.connect(self._blurry_photos_page.load_photos)
         self._indexing_page.cancel_button.clicked.connect(worker.cancel)
 
         thread.start()
@@ -165,6 +182,8 @@ class MainWindow(QMainWindow):
     def _handle_page_changed(self, row: int) -> None:
         if PAGE_TITLES[row] == "All Photos":
             self._all_photos_page.load_photos()
+        elif PAGE_TITLES[row] == "Blurry Photos":
+            self._blurry_photos_page.load_photos()
 
     def _clear_import_worker(self) -> None:
         self._indexing_page.cancel_button.clicked.disconnect()
@@ -192,15 +211,22 @@ class AllPhotosPage(QWidget):
     def __init__(
         self,
         session_factory_provider: Callable[[], sessionmaker[Session]],
+        *,
+        title: str = "All Photos",
+        empty_text: str = "No photos imported yet",
+        photos_loader: Callable[[PhotoRepository], list[Photo]] | None = None,
     ) -> None:
         super().__init__()
         self._session_factory_provider = session_factory_provider
+        self._photos_loader = photos_loader or (
+            lambda repository: repository.list_photos()
+        )
         self._thumbnail_loader = ThumbnailLoader()
 
-        title_label = QLabel("All Photos")
+        title_label = QLabel(title)
         title_label.setObjectName("pageTitle")
 
-        self._empty_label = QLabel("No photos imported yet")
+        self._empty_label = QLabel(empty_text)
         self._empty_label.setObjectName("emptyAllPhotosLabel")
 
         self._grid_container = QWidget()
@@ -224,7 +250,7 @@ class AllPhotosPage(QWidget):
         self._clear_grid()
         session_factory = self._session_factory_provider()
         with session_factory() as session:
-            photos = PhotoRepository(session).list_photos()
+            photos = self._photos_loader(PhotoRepository(session))
 
         self._empty_label.setVisible(not photos)
         for index, photo in enumerate(photos):
@@ -270,12 +296,16 @@ class PhotoGridItem(QFrame):
 
         capture_date_label = QLabel(_format_capture_date(photo.capture_timestamp))
         capture_date_label.setObjectName("photoCaptureDate")
+        blur_badge_label = QLabel(_format_blur_badge(photo.blur_score))
+        blur_badge_label.setObjectName("photoBlurBadge")
+        blur_badge_label.setVisible(photo.blur_score is not None)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
         layout.addWidget(self.thumbnail_label)
         layout.addWidget(self.thumbnail_state_label)
+        layout.addWidget(blur_badge_label)
         layout.addWidget(filename_label)
         layout.addWidget(capture_date_label)
 
@@ -595,6 +625,12 @@ def _format_optional_number(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value:.2f}"
+
+
+def _format_blur_badge(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"Blur {value:.0f}"
 
 
 def _format_dimensions(dimensions: tuple[int, int] | None) -> str:

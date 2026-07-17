@@ -166,6 +166,51 @@ def test_all_photos_page_loads_repository_records(
     assert page.findChild(QLabel, "emptyAllPhotosLabel").isHidden()
 
 
+def test_blurry_photos_page_reuses_gallery_with_blur_badges(
+    app: QApplication,
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "blurry.jpg"),
+                filename="blurry.jpg",
+                file_size=100,
+                blur_score=25.0,
+            ),
+        )
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path=str(tmp_path / "sharp.jpg"),
+                filename="sharp.jpg",
+                file_size=100,
+                blur_score=250.0,
+            ),
+        )
+
+    page = shell.AllPhotosPage(
+        lambda: session_factory,
+        title="Blurry Photos",
+        empty_text="No blurry photos found",
+        photos_loader=lambda repository: repository.list_blurry_photos(100.0),
+    )
+
+    page.load_photos()
+    app.processEvents()
+
+    assert page.findChild(QLabel, "pageTitle").text() == "Blurry Photos"
+    assert [
+        label.text()
+        for label in page.findChildren(QLabel, "photoFilename")
+    ] == ["blurry.jpg"]
+    assert [
+        label.text()
+        for label in page.findChildren(QLabel, "photoBlurBadge")
+    ] == ["Blur 25"]
+
+
 def test_gallery_selection_updates_photo_details_inspector(
     app: QApplication,
     tmp_path: Path,
@@ -288,11 +333,13 @@ def test_photo_grid_item_shows_placeholder_while_thumbnail_loads(
         filename="photo.jpg",
         file_size=100,
         thumbnail_path=str(tmp_path / "thumb.png"),
+        blur_score=42.0,
     )
 
     item = shell.PhotoGridItem(photo, loader)
 
     assert item.thumbnail_state_label.text() == "Loading..."
+    assert item.findChild(QLabel, "photoBlurBadge").text() == "Blur 42"
     assert loader.requested_path == tmp_path / "thumb.png"
 
 

@@ -8,6 +8,7 @@ from typing import Protocol
 from sqlalchemy.orm import Session, sessionmaker
 
 from lensmind.db.repository import PhotoData, PhotoRepository
+from lensmind.services.blur_analysis import BlurAnalysisService
 from lensmind.services.file_hashing import calculate_sha256
 from lensmind.services.photo_discovery import PhotoFileRecord, discover_photo_files
 from lensmind.services.photo_metadata import PhotoMetadataExtractor
@@ -52,9 +53,11 @@ class PhotoImportService:
         self,
         session_factory: sessionmaker[Session],
         metadata_extractor: PhotoMetadataExtractor | None = None,
+        blur_analysis_service: BlurAnalysisService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._metadata_extractor = metadata_extractor or PhotoMetadataExtractor()
+        self._blur_analysis_service = blur_analysis_service or BlurAnalysisService()
 
     def import_folder(
         self,
@@ -169,6 +172,11 @@ class PhotoImportService:
         if metadata.error is not None:
             errors.append(PhotoImportError(record.path, metadata.error))
 
+        blur_result = self._blur_analysis_service.analyze(record.path)
+        if blur_result.error is not None and metadata.error is None:
+            errors.append(PhotoImportError(record.path, blur_result.error))
+        processing_error = metadata.error or blur_result.error
+
         return PhotoData(
             original_path=str(record.path),
             filename=record.filename,
@@ -183,8 +191,9 @@ class PhotoImportService:
             camera_model=metadata.camera_model,
             latitude=metadata.latitude,
             longitude=metadata.longitude,
-            processing_status="metadata_error" if metadata.error else "imported",
-            processing_error=metadata.error,
+            blur_score=blur_result.raw_score,
+            processing_status=_processing_status(metadata.error, blur_result.error),
+            processing_error=processing_error,
             missing_file=False,
         )
 
@@ -209,3 +218,11 @@ def _emit_progress(
             error_count=error_count,
         ),
     )
+
+
+def _processing_status(metadata_error: str | None, blur_error: str | None) -> str:
+    if metadata_error is not None:
+        return "metadata_error"
+    if blur_error is not None:
+        return "analysis_error"
+    return "imported"

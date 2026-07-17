@@ -47,7 +47,7 @@ def test_import_folder_saves_discovered_photo_metadata(tmp_path: Path) -> None:
     assert {photo.processing_status for photo in photos} == {"imported"}
     assert photos[0].sha256 == calculate_sha256(first_image)
     assert photos[0].thumbnail_path is None
-    assert photos[0].blur_score is None
+    assert photos[0].blur_score is not None
 
 
 def test_import_folder_updates_existing_photos_without_duplicates(
@@ -71,6 +71,7 @@ def test_import_folder_updates_existing_photos_without_duplicates(
     assert len(photos) == 1
     assert photos[0].width == 12
     assert photos[0].height == 8
+    assert photos[0].blur_score is not None
 
 
 def test_import_folder_records_corrupted_images_without_stopping(

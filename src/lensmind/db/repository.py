@@ -99,6 +99,16 @@ class PhotoRepository:
     def list_photos(self) -> list[Photo]:
         return list(self._session.scalars(select(Photo).order_by(Photo.id)))
 
+    def list_blurry_photos(self, blur_threshold: float) -> list[Photo]:
+        return list(
+            self._session.scalars(
+                select(Photo)
+                .where(Photo.blur_score.is_not(None))
+                .where(Photo.blur_score <= blur_threshold)
+                .order_by(Photo.id),
+            ),
+        )
+
     def mark_photo_missing(self, photo_id: int) -> Photo | None:
         photo = self._session.get(Photo, photo_id)
         if photo is None:
