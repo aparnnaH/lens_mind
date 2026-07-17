@@ -12,6 +12,7 @@ from lensmind.services.blur_analysis import BlurAnalysisService
 from lensmind.services.file_hashing import calculate_sha256
 from lensmind.services.photo_discovery import PhotoFileRecord, discover_photo_files
 from lensmind.services.photo_metadata import PhotoMetadataExtractor
+from lensmind.services.thumbnail_generation import ThumbnailGenerator
 
 
 @dataclass(frozen=True)
@@ -54,10 +55,14 @@ class PhotoImportService:
         session_factory: sessionmaker[Session],
         metadata_extractor: PhotoMetadataExtractor | None = None,
         blur_analysis_service: BlurAnalysisService | None = None,
+        thumbnail_generator: ThumbnailGenerator | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._metadata_extractor = metadata_extractor or PhotoMetadataExtractor()
         self._blur_analysis_service = blur_analysis_service or BlurAnalysisService()
+        self._thumbnail_generator = thumbnail_generator or ThumbnailGenerator(
+            _default_thumbnail_cache_dir(),
+        )
 
     def import_folder(
         self,
@@ -175,7 +180,16 @@ class PhotoImportService:
         blur_result = self._blur_analysis_service.analyze(record.path)
         if blur_result.error is not None and metadata.error is None:
             errors.append(PhotoImportError(record.path, blur_result.error))
-        processing_error = metadata.error or blur_result.error
+
+        thumbnail_result = self._thumbnail_generator.generate(record.path)
+        if (
+            thumbnail_result.error is not None
+            and metadata.error is None
+            and blur_result.error is None
+        ):
+            errors.append(PhotoImportError(record.path, thumbnail_result.error))
+
+        processing_error = metadata.error or blur_result.error or thumbnail_result.error
 
         return PhotoData(
             original_path=str(record.path),
@@ -192,7 +206,16 @@ class PhotoImportService:
             latitude=metadata.latitude,
             longitude=metadata.longitude,
             blur_score=blur_result.raw_score,
-            processing_status=_processing_status(metadata.error, blur_result.error),
+            thumbnail_path=(
+                str(thumbnail_result.thumbnail_path)
+                if thumbnail_result.thumbnail_path is not None
+                else None
+            ),
+            processing_status=_processing_status(
+                metadata.error,
+                blur_result.error,
+                thumbnail_result.error,
+            ),
             processing_error=processing_error,
             missing_file=False,
         )
@@ -220,9 +243,19 @@ def _emit_progress(
     )
 
 
-def _processing_status(metadata_error: str | None, blur_error: str | None) -> str:
+def _processing_status(
+    metadata_error: str | None,
+    blur_error: str | None,
+    thumbnail_error: str | None,
+) -> str:
     if metadata_error is not None:
         return "metadata_error"
     if blur_error is not None:
         return "analysis_error"
+    if thumbnail_error is not None:
+        return "thumbnail_error"
     return "imported"
+
+
+def _default_thumbnail_cache_dir() -> Path:
+    return Path.home() / ".lensmind" / "thumbnails"

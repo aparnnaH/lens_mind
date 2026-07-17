@@ -8,6 +8,7 @@ from PIL import Image
 from lensmind.db.repository import PhotoRepository, initialize_sqlite
 from lensmind.services.file_hashing import calculate_sha256
 from lensmind.services.photo_import import PhotoImportService
+from lensmind.services.thumbnail_generation import ThumbnailGenerator
 
 
 def create_image(path: Path, size: tuple[int, int]) -> None:
@@ -33,7 +34,9 @@ def test_import_folder_saves_discovered_photo_metadata(tmp_path: Path) -> None:
 
     session_factory = initialize_sqlite(tmp_path / "lensmind.db")
 
-    summary = PhotoImportService(session_factory).import_folder(image_folder)
+    summary = create_import_service(session_factory, tmp_path).import_folder(
+        image_folder,
+    )
 
     with session_factory() as session:
         photos = PhotoRepository(session).list_photos()
@@ -46,7 +49,8 @@ def test_import_folder_saves_discovered_photo_metadata(tmp_path: Path) -> None:
     assert [(photo.width, photo.height) for photo in photos] == [(40, 30), (20, 10)]
     assert {photo.processing_status for photo in photos} == {"imported"}
     assert photos[0].sha256 == calculate_sha256(first_image)
-    assert photos[0].thumbnail_path is None
+    assert photos[0].thumbnail_path is not None
+    assert Path(photos[0].thumbnail_path).exists()
     assert photos[0].blur_score is not None
 
 
@@ -57,7 +61,7 @@ def test_import_folder_updates_existing_photos_without_duplicates(
     image_path = image_folder / "image.jpg"
     create_image(image_path, (10, 10))
     session_factory = initialize_sqlite(tmp_path / "lensmind.db")
-    service = PhotoImportService(session_factory)
+    service = create_import_service(session_factory, tmp_path)
 
     first_summary = service.import_folder(image_folder)
     create_image(image_path, (12, 8))
@@ -83,7 +87,9 @@ def test_import_folder_records_corrupted_images_without_stopping(
     bad_image.write_bytes(b"not an image")
     session_factory = initialize_sqlite(tmp_path / "lensmind.db")
 
-    summary = PhotoImportService(session_factory).import_folder(image_folder)
+    summary = create_import_service(session_factory, tmp_path).import_folder(
+        image_folder,
+    )
 
     with session_factory() as session:
         photos = PhotoRepository(session).list_photos()
@@ -96,3 +102,10 @@ def test_import_folder_records_corrupted_images_without_stopping(
         "imported",
         "metadata_error",
     }
+
+
+def create_import_service(session_factory, tmp_path: Path) -> PhotoImportService:
+    return PhotoImportService(
+        session_factory,
+        thumbnail_generator=ThumbnailGenerator(tmp_path / "thumb-cache"),
+    )

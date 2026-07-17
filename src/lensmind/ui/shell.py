@@ -289,7 +289,9 @@ class PhotoGridItem(QFrame):
         self.setFixedWidth(180)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._thumbnail_path = (
-            Path(photo.thumbnail_path) if photo.thumbnail_path else None
+            Path(photo.thumbnail_path)
+            if photo.thumbnail_path
+            else Path(photo.original_path)
         )
 
         self.thumbnail_label = QLabel()
@@ -333,10 +335,6 @@ class PhotoGridItem(QFrame):
     ) -> None:
         if photo.missing_file:
             self._set_thumbnail_state("Missing file", clear_image=True)
-            return
-
-        if self._thumbnail_path is None:
-            self._set_thumbnail_state("No thumbnail", clear_image=True)
             return
 
         self._set_thumbnail_state("Loading...", clear_image=True)
