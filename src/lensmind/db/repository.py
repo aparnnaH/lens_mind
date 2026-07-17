@@ -38,7 +38,11 @@ def initialize_sqlite(database_path: Path | str) -> sessionmaker[Session]:
 
 def create_sqlite_engine(database_path: Path | str) -> Engine:
     path = Path(database_path).expanduser()
-    return create_engine(f"sqlite:///{path}", future=True)
+    return create_engine(
+        f"sqlite:///{path}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
 
 
 class PhotoRepository:

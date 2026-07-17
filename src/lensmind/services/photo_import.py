@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -26,6 +27,24 @@ class PhotoImportSummary:
     files_imported: int
     files_added: int
     errors: tuple[PhotoImportError, ...]
+    status: str
+
+
+@dataclass(frozen=True)
+class PhotoImportProgress:
+    stage: str
+    current_filename: str
+    completed_count: int
+    total_count: int
+    error_count: int
+
+
+class ProgressCallback(Protocol):
+    def __call__(self, progress: PhotoImportProgress) -> None: ...
+
+
+class CancellationCallback(Protocol):
+    def __call__(self) -> bool: ...
 
 
 class PhotoImportService:
@@ -37,11 +56,20 @@ class PhotoImportService:
         self._session_factory = session_factory
         self._metadata_extractor = metadata_extractor or PhotoMetadataExtractor()
 
-    def import_folder(self, folder: Path | str) -> PhotoImportSummary:
+    def import_folder(
+        self,
+        folder: Path | str,
+        progress_callback: ProgressCallback | None = None,
+        should_cancel: CancellationCallback | None = None,
+    ) -> PhotoImportSummary:
         source_path = Path(folder).expanduser()
         started_at = datetime.now(UTC)
+        _emit_progress(progress_callback, "discovering", "", 0, 0, 0)
         records = discover_photo_files(source_path)
         errors: list[PhotoImportError] = []
+        total_count = len(records)
+        completed_count = 0
+        _emit_progress(progress_callback, "importing", "", 0, total_count, 0)
 
         with self._session_factory() as session:
             repository = PhotoRepository(session)
@@ -52,10 +80,32 @@ class PhotoImportService:
             }
             files_imported = 0
             files_added = 0
+            status = "completed"
 
             for record in records:
+                if should_cancel is not None and should_cancel():
+                    status = "cancelled"
+                    break
+
+                _emit_progress(
+                    progress_callback,
+                    "importing",
+                    record.filename,
+                    completed_count,
+                    total_count,
+                    len(errors),
+                )
                 photo_data = self._build_photo_data(record, errors)
+                completed_count += 1
                 if photo_data is None:
+                    _emit_progress(
+                        progress_callback,
+                        "importing",
+                        record.filename,
+                        completed_count,
+                        total_count,
+                        len(errors),
+                    )
                     continue
 
                 repository.add_or_update_photo(photo_data)
@@ -63,7 +113,26 @@ class PhotoImportService:
                 if record.path not in existing_paths:
                     files_added += 1
 
-            status = "completed_with_errors" if errors else "completed"
+                _emit_progress(
+                    progress_callback,
+                    "importing",
+                    record.filename,
+                    completed_count,
+                    total_count,
+                    len(errors),
+                )
+
+            if status != "cancelled" and errors:
+                status = "completed_with_errors"
+
+            _emit_progress(
+                progress_callback,
+                "recording",
+                "",
+                completed_count,
+                total_count,
+                len(errors),
+            )
             indexing_run = repository.record_indexing_run(
                 source_folder.id,
                 status=status,
@@ -81,6 +150,7 @@ class PhotoImportService:
                 files_imported=files_imported,
                 files_added=files_added,
                 errors=tuple(errors),
+                status=status,
             )
 
     def _build_photo_data(
@@ -114,3 +184,25 @@ class PhotoImportService:
             processing_error=metadata.error,
             missing_file=False,
         )
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    stage: str,
+    current_filename: str,
+    completed_count: int,
+    total_count: int,
+    error_count: int,
+) -> None:
+    if progress_callback is None:
+        return
+
+    progress_callback(
+        PhotoImportProgress(
+            stage=stage,
+            current_filename=current_filename,
+            completed_count=completed_count,
+            total_count=total_count,
+            error_count=error_count,
+        ),
+    )

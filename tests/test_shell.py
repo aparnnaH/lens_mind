@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -67,3 +68,45 @@ def test_main_window_creates_navigation_pages(app: QApplication) -> None:
     window._sidebar.setCurrentRow(target_index)
 
     assert window._pages.currentIndex() == target_index
+
+
+def test_indexing_page_displays_import_progress(app: QApplication, tmp_path) -> None:
+    page = shell.IndexingPage()
+
+    page.prepare_for_import(tmp_path / "photos")
+    page.set_stage("importing")
+    page.set_current_filename("image.jpg")
+    page.set_total_count(4)
+    page.set_completed_count(2)
+    page.set_error_count(1)
+
+    assert page.source_folder_label.text() == str(tmp_path / "photos")
+    assert page.stage_label.text() == "importing"
+    assert page.current_filename_label.text() == "image.jpg"
+    assert page.counts_label.text() == "2 / 4"
+    assert page.error_count_label.text() == "1"
+    assert page.progress_bar.value() == 2
+    assert page.progress_bar.maximum() == 4
+    assert page.cancel_button.isEnabled()
+
+
+def test_import_folder_action_uses_native_folder_picker(
+    app: QApplication,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = shell.MainWindow()
+    selected_folders: list[Path] = []
+
+    monkeypatch.setattr(
+        shell.QFileDialog,
+        "getExistingDirectory",
+        lambda *_args: str(tmp_path),
+    )
+    monkeypatch.setattr(window, "_start_import", selected_folders.append)
+
+    assert window._import_folder_action.text() == "Import Folder"
+
+    window._choose_import_folder()
+
+    assert selected_folders == [tmp_path]
