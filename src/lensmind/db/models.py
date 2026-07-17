@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -63,6 +73,10 @@ class Photo(Base):
         cascade="all, delete-orphan",
     )
     duplicate_links: Mapped[list[DuplicateGroupPhoto]] = relationship(
+        back_populates="photo",
+        cascade="all, delete-orphan",
+    )
+    embeddings: Mapped[list[PhotoEmbedding]] = relationship(
         back_populates="photo",
         cascade="all, delete-orphan",
     )
@@ -162,3 +176,23 @@ class DuplicateGroupPhoto(Base):
         back_populates="photo_links",
     )
     photo: Mapped[Photo] = relationship(back_populates="duplicate_links")
+
+
+class PhotoEmbedding(Base):
+    __tablename__ = "photo_embeddings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    photo_id: Mapped[int] = mapped_column(ForeignKey("photos.id"), nullable=False)
+    photo_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    model_name: Mapped[str] = mapped_column(String, nullable=False)
+    model_config: Mapped[str] = mapped_column(String, nullable=False)
+    vector_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding_data: Mapped[bytes | None] = mapped_column(LargeBinary)
+    embedding_reference: Mapped[str | None] = mapped_column(String)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    photo: Mapped[Photo] = relationship(back_populates="embeddings")

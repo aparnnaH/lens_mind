@@ -11,7 +11,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from lensmind.db.repository import PhotoRepository, initialize_sqlite  # noqa: E402
+from lensmind.services.embeddings import EmbeddingResult  # noqa: E402
 from lensmind.services.photo_import import PhotoImportService  # noqa: E402
+from lensmind.services.thumbnail_generation import ThumbnailGenerator  # noqa: E402
 from lensmind.ui.import_worker import PhotoImportWorker  # noqa: E402
 
 
@@ -37,7 +39,11 @@ def test_import_worker_emits_progress_and_finished_status(
     create_image(tmp_path / "photos" / "two.png")
     session_factory = initialize_sqlite(tmp_path / "lensmind.db")
     worker = PhotoImportWorker(
-        import_service=PhotoImportService(session_factory),
+        import_service=PhotoImportService(
+            session_factory,
+            thumbnail_generator=ThumbnailGenerator(tmp_path / "thumb-cache"),
+            embedding_provider=FakeEmbeddingProvider(),
+        ),
         folder=tmp_path / "photos",
     )
     stages: list[str] = []
@@ -62,14 +68,11 @@ def test_import_worker_emits_progress_and_finished_status(
 
     assert "discovering" in stages
     assert "importing" in stages
+    assert "embedding" in stages
     assert "recording" in stages
     assert stages[-1] == "completed"
-    assert [filename for filename in filenames if filename] == [
-        "one.jpg",
-        "one.jpg",
-        "two.png",
-        "two.png",
-    ]
+    assert "one.jpg" in filenames
+    assert "two.png" in filenames
     assert completed_counts[-1] == 2
     assert max(total_counts) == 2
     assert error_counts[-1] == 0
@@ -85,7 +88,11 @@ def test_import_worker_supports_cancellation(
     create_image(tmp_path / "photos" / "two.jpg")
     session_factory = initialize_sqlite(tmp_path / "lensmind.db")
     worker = PhotoImportWorker(
-        import_service=PhotoImportService(session_factory),
+        import_service=PhotoImportService(
+            session_factory,
+            thumbnail_generator=ThumbnailGenerator(tmp_path / "thumb-cache"),
+            embedding_provider=FakeEmbeddingProvider(),
+        ),
         folder=tmp_path / "photos",
     )
     finished_statuses: list[str] = []
@@ -105,3 +112,33 @@ def test_import_worker_supports_cancellation(
 
     assert finished_statuses == ["cancelled"]
     assert len(photos) == 1
+
+
+class FakeEmbeddingProvider:
+    model_name = "ViT-B-32"
+    pretrained = "test-pretrained"
+    batch_size = 2
+
+    def embed_images(self, paths: list[Path]) -> list[EmbeddingResult]:
+        return [
+            EmbeddingResult(
+                vector=(0.6, 0.8),
+                dimension=2,
+                model_name=self.model_name,
+                pretrained=self.pretrained,
+                device="cpu",
+            )
+            for _path in paths
+        ]
+
+    def embed_texts(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [
+            EmbeddingResult(
+                vector=(0.6, 0.8),
+                dimension=2,
+                model_name=self.model_name,
+                pretrained=self.pretrained,
+                device="cpu",
+            )
+            for _text in texts
+        ]

@@ -5,7 +5,12 @@ from pathlib import Path
 
 from sqlalchemy import inspect
 
-from lensmind.db.repository import PhotoData, PhotoRepository, initialize_sqlite
+from lensmind.db.repository import (
+    PhotoData,
+    PhotoEmbeddingData,
+    PhotoRepository,
+    initialize_sqlite,
+)
 
 
 def test_initialize_sqlite_creates_database_tables(tmp_path: Path) -> None:
@@ -137,3 +142,100 @@ def test_record_indexing_run(tmp_path: Path) -> None:
     assert indexing_run.status == "completed"
     assert indexing_run.files_seen == 10
     assert indexing_run.files_added == 4
+
+
+def test_photo_embedding_cache_uses_photo_hash_and_model_config(
+    tmp_path: Path,
+) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        photo = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/image.jpg",
+                filename="image.jpg",
+                file_size=100,
+                sha256="a" * 64,
+            ),
+        )
+
+        assert repository.photo_needs_embedding(
+            photo.id,
+            model_name="ViT-B-32",
+            model_config="laion2b_s34b_b79k",
+        )
+
+        repository.save_photo_embedding(
+            PhotoEmbeddingData(
+                photo_id=photo.id,
+                model_name="ViT-B-32",
+                model_config="laion2b_s34b_b79k",
+                vector_dimension=3,
+                embedding_data=b"embedding-bytes",
+            ),
+        )
+        cached = repository.get_cached_photo_embedding(
+            photo.id,
+            model_name="ViT-B-32",
+            model_config="laion2b_s34b_b79k",
+        )
+
+        assert cached is not None
+        assert cached.photo_sha256 == "a" * 64
+        assert cached.embedding_data == b"embedding-bytes"
+        assert cached.embedding_reference is None
+        assert cached.vector_dimension == 3
+        assert not repository.photo_needs_embedding(
+            photo.id,
+            model_name="ViT-B-32",
+            model_config="laion2b_s34b_b79k",
+        )
+
+        repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/image.jpg",
+                filename="image.jpg",
+                file_size=100,
+                sha256="b" * 64,
+            ),
+        )
+
+        assert repository.photo_needs_embedding(
+            photo.id,
+            model_name="ViT-B-32",
+            model_config="laion2b_s34b_b79k",
+        )
+
+
+def test_photo_embedding_can_store_local_reference(tmp_path: Path) -> None:
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        photo = repository.add_or_update_photo(
+            PhotoData(
+                original_path="/photos/image.jpg",
+                filename="image.jpg",
+                file_size=100,
+                sha256="a" * 64,
+            ),
+        )
+        repository.save_photo_embedding(
+            PhotoEmbeddingData(
+                photo_id=photo.id,
+                model_name="ViT-B-32",
+                model_config="laion2b_s34b_b79k",
+                vector_dimension=512,
+                embedding_reference="/embeddings/image.npy",
+            ),
+        )
+        cached = repository.get_cached_photo_embedding(
+            photo.id,
+            model_name="ViT-B-32",
+            model_config="laion2b_s34b_b79k",
+        )
+
+    assert cached is not None
+    assert cached.embedding_data is None
+    assert cached.embedding_reference == "/embeddings/image.npy"

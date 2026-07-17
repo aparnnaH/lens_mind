@@ -16,6 +16,7 @@ def test_models_create_expected_tables() -> None:
         "duplicate_group_photos",
         "duplicate_groups",
         "indexing_runs",
+        "photo_embeddings",
         "photos",
         "source_folders",
     }

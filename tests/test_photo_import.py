@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from lensmind.db.repository import PhotoRepository, initialize_sqlite
+from lensmind.services.embeddings import EmbeddingResult
 from lensmind.services.file_hashing import calculate_sha256
 from lensmind.services.photo_import import PhotoImportService
 from lensmind.services.thumbnail_generation import ThumbnailGenerator
@@ -78,6 +79,54 @@ def test_import_folder_updates_existing_photos_without_duplicates(
     assert photos[0].blur_score is not None
 
 
+def test_import_folder_generates_and_caches_image_embeddings(
+    tmp_path: Path,
+) -> None:
+    image_folder = tmp_path / "photos"
+    first_image = image_folder / "first.jpg"
+    second_image = image_folder / "second.png"
+    create_image(first_image, (10, 10))
+    create_image(second_image, (10, 10))
+    session_factory = initialize_sqlite(tmp_path / "lensmind.db")
+    embedding_provider = FakeEmbeddingProvider(batch_size=1)
+    service = create_import_service(
+        session_factory,
+        tmp_path,
+        embedding_provider=embedding_provider,
+    )
+
+    service.import_folder(image_folder)
+
+    with session_factory() as session:
+        repository = PhotoRepository(session)
+        photos = repository.list_photos()
+        cached_embeddings = [
+            repository.get_cached_photo_embedding(
+                photo.id,
+                model_name=embedding_provider.model_name,
+                model_config=embedding_provider.pretrained,
+            )
+            for photo in photos
+        ]
+
+    assert embedding_provider.image_batches == [
+        [first_image],
+        [second_image],
+    ]
+    assert all(embedding is not None for embedding in cached_embeddings)
+    assert {
+        embedding.vector_dimension
+        for embedding in cached_embeddings
+        if embedding is not None
+    } == {2}
+
+    embedding_provider.image_batches.clear()
+
+    service.import_folder(image_folder)
+
+    assert embedding_provider.image_batches == []
+
+
 def test_import_folder_records_corrupted_images_without_stopping(
     tmp_path: Path,
 ) -> None:
@@ -104,8 +153,47 @@ def test_import_folder_records_corrupted_images_without_stopping(
     }
 
 
-def create_import_service(session_factory, tmp_path: Path) -> PhotoImportService:
+def create_import_service(
+    session_factory,
+    tmp_path: Path,
+    embedding_provider: FakeEmbeddingProvider | None = None,
+) -> PhotoImportService:
     return PhotoImportService(
         session_factory,
         thumbnail_generator=ThumbnailGenerator(tmp_path / "thumb-cache"),
+        embedding_provider=embedding_provider or FakeEmbeddingProvider(),
     )
+
+
+class FakeEmbeddingProvider:
+    model_name = "ViT-B-32"
+    pretrained = "test-pretrained"
+
+    def __init__(self, batch_size: int = 2) -> None:
+        self.batch_size = batch_size
+        self.image_batches: list[list[Path]] = []
+
+    def embed_images(self, paths: list[Path]) -> list[EmbeddingResult]:
+        self.image_batches.append(paths)
+        return [
+            EmbeddingResult(
+                vector=(0.6, 0.8),
+                dimension=2,
+                model_name=self.model_name,
+                pretrained=self.pretrained,
+                device="cpu",
+            )
+            for _path in paths
+        ]
+
+    def embed_texts(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [
+            EmbeddingResult(
+                vector=(0.6, 0.8),
+                dimension=2,
+                model_name=self.model_name,
+                pretrained=self.pretrained,
+                device="cpu",
+            )
+            for _text in texts
+        ]

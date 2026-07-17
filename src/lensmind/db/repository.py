@@ -12,6 +12,7 @@ from lensmind.db.models import (
     DuplicateGroup,
     IndexingRun,
     Photo,
+    PhotoEmbedding,
     SourceFolder,
 )
 
@@ -59,6 +60,29 @@ class DuplicateGroupData:
     reviewed: bool
     preferred_photo_id: int | None
     photos: tuple[DuplicatePhotoData, ...]
+
+
+@dataclass(frozen=True)
+class PhotoEmbeddingData:
+    photo_id: int
+    model_name: str
+    model_config: str
+    vector_dimension: int
+    embedding_data: bytes | None = None
+    embedding_reference: str | None = None
+
+
+@dataclass(frozen=True)
+class CachedPhotoEmbeddingData:
+    id: int
+    photo_id: int
+    photo_sha256: str | None
+    model_name: str
+    model_config: str
+    vector_dimension: int
+    embedding_data: bytes | None
+    embedding_reference: str | None
+    generated_at: datetime
 
 
 def initialize_sqlite(database_path: Path | str) -> sessionmaker[Session]:
@@ -146,6 +170,82 @@ class PhotoRepository:
             ),
         )
         return [self._duplicate_group_data(group) for group in groups]
+
+    def save_photo_embedding(self, data: PhotoEmbeddingData) -> PhotoEmbedding:
+        photo = self._session.get(Photo, data.photo_id)
+        if photo is None:
+            msg = f"photo not found: {data.photo_id}"
+            raise ValueError(msg)
+
+        existing = self._find_embedding(
+            photo_id=data.photo_id,
+            photo_sha256=photo.sha256,
+            model_name=data.model_name,
+            model_config=data.model_config,
+        )
+        if existing is None:
+            existing = PhotoEmbedding(
+                photo_id=data.photo_id,
+                photo_sha256=photo.sha256,
+                model_name=data.model_name,
+                model_config=data.model_config,
+                vector_dimension=data.vector_dimension,
+            )
+            self._session.add(existing)
+
+        existing.vector_dimension = data.vector_dimension
+        existing.embedding_data = data.embedding_data
+        existing.embedding_reference = data.embedding_reference
+        self._session.commit()
+        return existing
+
+    def get_cached_photo_embedding(
+        self,
+        photo_id: int,
+        *,
+        model_name: str,
+        model_config: str,
+    ) -> CachedPhotoEmbeddingData | None:
+        photo = self._session.get(Photo, photo_id)
+        if photo is None:
+            return None
+
+        embedding = self._find_embedding(
+            photo_id=photo_id,
+            photo_sha256=photo.sha256,
+            model_name=model_name,
+            model_config=model_config,
+        )
+        if embedding is None:
+            return None
+
+        return CachedPhotoEmbeddingData(
+            id=embedding.id,
+            photo_id=embedding.photo_id,
+            photo_sha256=embedding.photo_sha256,
+            model_name=embedding.model_name,
+            model_config=embedding.model_config,
+            vector_dimension=embedding.vector_dimension,
+            embedding_data=embedding.embedding_data,
+            embedding_reference=embedding.embedding_reference,
+            generated_at=embedding.generated_at,
+        )
+
+    def photo_needs_embedding(
+        self,
+        photo_id: int,
+        *,
+        model_name: str,
+        model_config: str,
+    ) -> bool:
+        return (
+            self.get_cached_photo_embedding(
+                photo_id,
+                model_name=model_name,
+                model_config=model_config,
+            )
+            is None
+        )
 
     def mark_duplicate_group_reviewed(self, duplicate_group_id: int) -> None:
         duplicate_group = self._session.get(DuplicateGroup, duplicate_group_id)
@@ -246,4 +346,20 @@ class PhotoRepository:
             reviewed=duplicate_group.reviewed,
             preferred_photo_id=duplicate_group.preferred_photo_id,
             photos=photos,
+        )
+
+    def _find_embedding(
+        self,
+        *,
+        photo_id: int,
+        photo_sha256: str | None,
+        model_name: str,
+        model_config: str,
+    ) -> PhotoEmbedding | None:
+        return self._session.scalar(
+            select(PhotoEmbedding)
+            .where(PhotoEmbedding.photo_id == photo_id)
+            .where(PhotoEmbedding.photo_sha256 == photo_sha256)
+            .where(PhotoEmbedding.model_name == model_name)
+            .where(PhotoEmbedding.model_config == model_config),
         )
